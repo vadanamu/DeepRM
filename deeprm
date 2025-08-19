@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+
+# Ensure `src` directory is on sys.path when running from a source checkout
+repo_root = Path(__file__).resolve().parent
+src_dir = repo_root / "src"
+if src_dir.exists():
+    sys.path.insert(0, str(src_dir))
+
+from deeprm.cli import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())
