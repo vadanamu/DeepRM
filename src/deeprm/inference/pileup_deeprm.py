@@ -17,7 +17,6 @@ import glob
 import multiprocessing as mp
 import os
 import uuid
-from multiprocessing import resource_tracker
 from multiprocessing import shared_memory as shm
 
 import numpy as np
@@ -93,10 +92,6 @@ def shm_view(meta):
     # stored on the SharedMemory object (e.g. '/name'), not necessarily the
     # public name string we passed in. Unregister this borrowed attachment
     # right away so only the creating worker remains responsible for unlink().
-    try:
-        resource_tracker.unregister(block._name, "shared_memory")
-    except Exception:
-        pass
     arr = np.ndarray(tuple(meta["shape"]), dtype=np.dtype(meta["dtype"]), buffer=block.buf)
     return block, arr
 
