@@ -61,6 +61,42 @@ def add_arguments(parser: argparse.ArgumentParser):
     return None
 
 
+def _prepare_bam_dataframe(args: argparse.Namespace) -> pd.DataFrame:
+    """Build BAM metadata table used by downstream signal segmentation."""
+    manager = mp.Manager()
+    bam_df = manager.list()
+    n_bam_procs = max(1, args.thread // args.bam_thread)
+    proc_list = []
+    for pid in range(n_bam_procs):
+        proc = mp.Process(
+            target=parse_bam,
+            args=(pid, n_bam_procs, args.bam_thread, bam_df, args.bam, args.qcut, args.boi, args.sampling),
+        )
+        proc_list.append(proc)
+        proc.start()
+    wait_for_processes(proc_list, "BAM parsing")
+
+    bam_frames = list(bam_df)
+    if len(bam_frames) == 0:
+        raise RuntimeError("BAM parsing produced no worker outputs")
+    result = pd.concat(bam_frames, ignore_index=True)
+    result.set_index("parent_id", inplace=True)
+    manager.shutdown()
+    gc.collect()
+    return result
+
+
+def _list_pod5_paths(pod5_path: str) -> list[str]:
+    """Return POD5 file paths to preprocess."""
+    if os.path.isfile(pod5_path):
+        return [pod5_path]
+
+    pod5_file_list = glob.glob(os.path.join(pod5_path, "*.pod5"))
+    if len(pod5_file_list) == 0:
+        raise FileNotFoundError(f"No POD5 files found in directory: {pod5_path}")
+    return pod5_file_list
+
+
 def wait_for_processes(proc_list, stage_name):
     """
     Join a list of processes and raise if any subprocess failed.
@@ -124,37 +160,12 @@ def main(args: argparse.Namespace):
     os.makedirs(args.output, exist_ok=True)
     norm_factor = get_norm_factor()
 
-    manager = mp.Manager()
-    bam_df = manager.list()
-    n_bam_procs = max(1, args.thread // args.bam_thread)
-    proc_list = []
-    for pid in range(n_bam_procs):
-        proc = mp.Process(
-            target=parse_bam,
-            args=(pid, n_bam_procs, args.bam_thread, bam_df, args.bam, args.qcut, args.boi, args.sampling),
-        )
-        proc_list.append(proc)
-        proc.start()
-    wait_for_processes(proc_list, "BAM parsing")
-
-    bam_frames = list(bam_df)
-    if len(bam_frames) == 0:
-        raise RuntimeError("BAM parsing produced no worker outputs")
-    bam_df = pd.concat(bam_frames, ignore_index=True)
-    bam_df.set_index("parent_id", inplace=True)
-    manager.shutdown()
-    gc.collect()
+    bam_df = _prepare_bam_dataframe(args)
 
     mp.set_start_method("fork", force=True)
 
-    if os.path.isfile(args.pod5):
-        pod5_paths_split = [[args.pod5]]
-
-    else:
-        pod5_file_list = glob.glob(os.path.join(args.pod5, "*.pod5"))
-        if len(pod5_file_list) == 0:
-            raise FileNotFoundError(f"No POD5 files found in directory: {args.pod5}")
-        pod5_paths_split = np.array_split(pod5_file_list, min(args.thread, len(pod5_file_list)))
+    pod5_file_list = _list_pod5_paths(args.pod5)
+    pod5_paths_split = np.array_split(pod5_file_list, min(args.thread, len(pod5_file_list)))
 
     proc_list = []
     for pid, pod5_paths in enumerate(pod5_paths_split):
@@ -184,6 +195,65 @@ def main(args: argparse.Namespace):
     wait_for_processes(proc_list, "Signal segmentation/normalization")
 
     log.info("Finished DeepRM Preprocessing")
+    return None
+
+
+def stream(args: argparse.Namespace, emit_chunk, write_to_disk: bool = False, disk_output_path: str | None = None):
+    """
+    Preprocess reads and emit each chunk directly to a callback.
+
+    Args:
+        args (argparse.Namespace): Preprocess arguments.
+        emit_chunk (Callable[[dict], None]): Callback receiving in-memory chunk tensors/arrays.
+        write_to_disk (bool): If True, save emitted chunks as .npz as well.
+        disk_output_path (str | None): Optional directory for written chunks.
+    """
+    if not callable(emit_chunk):
+        raise ValueError("emit_chunk must be callable")
+
+    if not os.path.exists(args.pod5):
+        raise FileNotFoundError(f"Input directory {args.pod5} does not exist")
+    if not os.path.exists(args.bam):
+        raise FileNotFoundError(f"BAM file {args.bam} does not exist")
+    if args.thread < 1:
+        raise ValueError("--thread must be >= 1")
+    if args.bam_thread < 1:
+        raise ValueError("--bam-thread must be >= 1")
+    if args.sampling < 1:
+        raise ValueError("--sampling must be >= 1")
+    if args.process_once < 1:
+        raise ValueError("--process-once must be >= 1")
+
+    args.bam = maybe_index_bam(args.bam, args.thread)
+    if write_to_disk:
+        if disk_output_path is None:
+            disk_output_path = args.output
+        os.makedirs(disk_output_path, exist_ok=True)
+
+    log.info("Started DeepRM Preprocessing (stream mode)")
+    norm_factor = get_norm_factor()
+    bam_df = _prepare_bam_dataframe(args)
+    pod5_paths = _list_pod5_paths(args.pod5)
+    mp.set_start_method("fork", force=True)
+    segment_normalize_signal(
+        bam_df=bam_df,
+        pod5_paths=pod5_paths,
+        norm_factor=norm_factor,
+        pid=0,
+        token_output_path=disk_output_path or args.output,
+        cb_len=args.cb_len,
+        kmer_len=args.kmer_len,
+        chunk_size=args.chunk,
+        max_token_len=args.max_token_len,
+        sampling=args.sampling,
+        dwell_shift=args.dwell_shift,
+        sig_window=args.sig_window,
+        process_once=args.process_once,
+        label_div=args.label_div,
+        emit_chunk_fn=emit_chunk,
+        write_to_disk=write_to_disk,
+    )
+    log.info("Finished DeepRM Preprocessing (stream mode)")
     return None
 
 
@@ -522,6 +592,8 @@ def segment_normalize_signal(
     sig_window=5,
     process_once=1000,
     label_div=10**9,
+    emit_chunk_fn=None,
+    write_to_disk=True,
 ):
     """
     Segment and normalize signals per read, and save token chunks.
@@ -686,7 +758,11 @@ def segment_normalize_signal(
                 for chunk_idx in range(0, len(signal_df) // chunk_size):
                     chunk = signal_df.iloc[chunk_idx * chunk_size : (chunk_idx + 1) * chunk_size]
                     outpath = f"{out_prefix}-{chunk_idx}.npz"
-                    save_npz(outpath, chunk)
+                    chunk_data = dataframe_to_chunk(chunk)
+                    if write_to_disk:
+                        save_npz(outpath, chunk_data=chunk_data)
+                    if emit_chunk_fn is not None:
+                        emit_chunk_fn(chunk_data)
 
                 chunk = signal_df.iloc[(len(signal_df) // chunk_size) * chunk_size :].copy()
                 if len(chunk) > 0:
@@ -700,15 +776,37 @@ def segment_normalize_signal(
         for chunk_idx in range(0, len(buffer) // chunk_size):
             chunk = buffer.iloc[chunk_idx * chunk_size : (chunk_idx + 1) * chunk_size]
             outpath = f"{out_prefix}-{chunk_idx}.npz"
-            save_npz(outpath, chunk)
+            chunk_data = dataframe_to_chunk(chunk)
+            if write_to_disk:
+                save_npz(outpath, chunk_data=chunk_data)
+            if emit_chunk_fn is not None:
+                emit_chunk_fn(chunk_data)
         chunk = buffer.iloc[(len(buffer) // chunk_size) * chunk_size :].copy()
         if len(chunk) > 0:
             outpath = f"{out_prefix}-last.npz"
-            save_npz(outpath, chunk)
+            chunk_data = dataframe_to_chunk(chunk)
+            if write_to_disk:
+                save_npz(outpath, chunk_data=chunk_data)
+            if emit_chunk_fn is not None:
+                emit_chunk_fn(chunk_data)
     return None
 
 
-def save_npz(save_path, df):
+def dataframe_to_chunk(df):
+    """Convert a token DataFrame into serialized array payload."""
+    return {
+        "segment_len_arr": np.stack(df["segment_len_arr"].values),
+        "signal_token": np.stack(df["signal_token"].values),
+        "kmer_token": np.stack(df["kmer_token"].values),
+        "dwell_motor_token": np.stack(df["dwell_motor_token"].values),
+        "dwell_pore_token": np.stack(df["dwell_pore_token"].values),
+        "bq_token": np.stack(df["bq_token"].values),
+        "label_id": df["label_id"].values,
+        "read_id": np.frombuffer(b"".join(u.bytes for u in df["read_id"].values), dtype=np.int64).reshape(-1, 2),
+    }
+
+
+def save_npz(save_path, df=None, chunk_data=None):
     """
     Serialize token DataFrame to a compressed .npz file.
 
@@ -719,23 +817,19 @@ def save_npz(save_path, df):
     Returns:
         None
     """
-    segment_len_arr = np.stack(df["segment_len_arr"].values)
-    signal_token = np.stack(df["signal_token"].values)
-    kmer_token = np.stack(df["kmer_token"].values)
-    dwell_motor_token = np.stack(df["dwell_motor_token"].values)
-    dwell_pore_token = np.stack(df["dwell_pore_token"].values)
-    bq_token = np.stack(df["bq_token"].values)
-    label_id = df["label_id"].values
-    read_id = np.frombuffer(b"".join(u.bytes for u in df["read_id"].values), dtype=np.int64).reshape(-1, 2)
+    if chunk_data is None:
+        if df is None:
+            raise ValueError("Either df or chunk_data must be provided to save_npz")
+        chunk_data = dataframe_to_chunk(df)
     np.savez_compressed(
         save_path,
-        segment_len_arr=segment_len_arr,
-        signal_token=signal_token,
-        kmer_token=kmer_token,
-        dwell_motor_token=dwell_motor_token,
-        dwell_pore_token=dwell_pore_token,
-        bq_token=bq_token,
-        label_id=label_id,
-        read_id=read_id,
+        segment_len_arr=chunk_data["segment_len_arr"],
+        signal_token=chunk_data["signal_token"],
+        kmer_token=chunk_data["kmer_token"],
+        dwell_motor_token=chunk_data["dwell_motor_token"],
+        dwell_pore_token=chunk_data["dwell_pore_token"],
+        bq_token=chunk_data["bq_token"],
+        label_id=chunk_data["label_id"],
+        read_id=chunk_data["read_id"],
     )
     return None
