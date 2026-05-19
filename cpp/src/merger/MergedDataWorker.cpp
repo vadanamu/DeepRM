@@ -22,6 +22,21 @@
 #include <utility>
 
 namespace deeprm {
+  namespace {
+    // Watson-Crick complement; returns the input unchanged for anything that
+    // is not a canonical base so non-ACGT bases-of-interest still work.
+    char complement_base(char b)
+    {
+      switch (b) {
+        case 'A': return 'T';
+        case 'T': return 'A';
+        case 'C': return 'G';
+        case 'G': return 'C';
+        default:  return b;
+      }
+    }
+  } // namespace
+
   MergedDataWorker::MergedDataWorker(int id, const Arguments& args,
                                      const vector<Pod5RecordMeta>& pod5_meta)
     : worker_id(id), args(args), pod5_meta_records(pod5_meta),
@@ -282,6 +297,12 @@ namespace deeprm {
       return pairs;
     }
 
+    // Make the base-of-interest strand-aware: for a reverse-strand read the
+    // forward-reference base at a base-of-interest site is the complement of
+    // `boi` (e.g. an m6A 'A' appears as 'T' on the forward reference).
+    char effective_boi = (read->core.flag & BAM_FREVERSE)
+                           ? complement_base(boi) : boi;
+
     uint32_t* cigar = bam_get_cigar(read);
     int32_t ref_pos = read->core.pos;
     int32_t query_pos = 0;
@@ -297,7 +318,7 @@ namespace deeprm {
         case BAM_CDIFF:
           for (int j = 0; j < len; ++j) {
             // Check reference base
-            if (cmp_less(ref_seq_idx, ref_seq.length()) && ref_seq[ref_seq_idx] == boi) {
+            if (cmp_less(ref_seq_idx, ref_seq.length()) && ref_seq[ref_seq_idx] == effective_boi) {
               pairs.emplace_back(query_pos, ref_pos + j);
             }
             query_pos++;

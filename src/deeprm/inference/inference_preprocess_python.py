@@ -30,6 +30,18 @@ from deeprm.utils.utils import maybe_index_bam
 
 log = get_logger(__name__)
 
+# Complement used to make the base-of-interest filter strand-aware. For a
+# reverse-strand read the forward-reference base at a base-of-interest site is
+# the complement of `boi` (e.g. an m6A 'A' shows up as 'T' on the forward ref).
+_BASE_COMPLEMENT = {"A": "T", "T": "A", "C": "G", "G": "C"}
+
+# ASCII complement table for reverse-complementing the (uint8) query_sequence
+# of reverse-strand reads back into RNA-sense orientation. Non-ACGT bytes
+# (e.g. 'N') map to themselves.
+_ASCII_COMPLEMENT = np.arange(256, dtype=np.uint8)
+for _a, _b in [(65, 84), (84, 65), (67, 71), (71, 67), (97, 116), (116, 97), (99, 103), (103, 99)]:
+    _ASCII_COMPLEMENT[_a] = _b
+
 
 def add_arguments(parser: argparse.ArgumentParser):
     """
@@ -56,7 +68,16 @@ def add_arguments(parser: argparse.ArgumentParser):
     parser.add_argument("--dwell-shift", "-f", type=int, default=10, help="Distance between motor and pore")
     parser.add_argument("--sig-window", "-w", type=int, default=5, help="Signal window size")
     parser.add_argument("--label-div", "-d", type=int, default=10**9, help="Label division factor")
-    parser.add_argument("--filter-flag", "-g", type=int, default=276, help="(Not used, for compatibility)")
+    parser.add_argument(
+        "--filter-flag",
+        "-g",
+        type=int,
+        default=276,
+        help="BAM flag bits to exclude (read skipped if read.flag & filter-flag). "
+        "Use 276 (unmapped+reverse+secondary) for transcriptome-mapped BAMs; "
+        "260 (unmapped+secondary) for genome-mapped BAMs so minus-strand-gene "
+        "reads are kept and processed in RNA-sense. Honored by both paths.",
+    )
 
     return None
 
@@ -131,7 +152,17 @@ def main(args: argparse.Namespace):
     for pid in range(n_bam_procs):
         proc = mp.Process(
             target=parse_bam,
-            args=(pid, n_bam_procs, args.bam_thread, bam_df, args.bam, args.qcut, args.boi, args.sampling),
+            args=(
+                pid,
+                n_bam_procs,
+                args.bam_thread,
+                bam_df,
+                args.bam,
+                args.qcut,
+                args.boi,
+                args.sampling,
+                args.filter_flag,
+            ),
         )
         proc_list.append(proc)
         proc.start()
@@ -419,7 +450,7 @@ def parse_pod5(pod5_path, read_ids):
     return signal_df
 
 
-def parse_bam(pid, n_procs, n_thread, bam_data, bam_path, bq_cutoff, boi, expected_sampling):
+def parse_bam(pid, n_procs, n_thread, bam_data, bam_path, bq_cutoff, boi, expected_sampling, filter_flag=276):
     """
     Extract move tags and alignment information from a BAM file in parallel.
 
@@ -432,6 +463,11 @@ def parse_bam(pid, n_procs, n_thread, bam_data, bam_path, bq_cutoff, boi, expect
         bq_cutoff (int): minimum average base quality threshold.
         boi (str): base-of-interest for alignment extraction.
         expected_sampling (int): expected move-tag stride in samples.
+        filter_flag (int): BAM flag bits to exclude (read skipped if
+            ``read.flag & filter_flag``). Same semantics as the C++ path.
+            Use 276 (unmapped+reverse+secondary) for transcriptome-mapped
+            BAMs, 260 (unmapped+secondary) for genome-mapped BAMs so minus-
+            strand-gene reads are kept and processed in RNA-sense.
 
     Returns:
         None (appends DataFrame to bam_data).
@@ -444,7 +480,7 @@ def parse_bam(pid, n_procs, n_thread, bam_data, bam_path, bq_cutoff, boi, expect
     for read_idx, read in tqdm.tqdm(enumerate(input_bam), total=input_bam.mapped + input_bam.unmapped):
         if read_idx % n_procs != pid:
             continue
-        if read.is_unmapped or (not read.has_tag("mv")):
+        if (read.flag & filter_flag) or (not read.has_tag("mv")):
             continue
         try:
             bq = np.array(read.query_qualities, dtype=np.int8)
@@ -465,8 +501,10 @@ def parse_bam(pid, n_procs, n_thread, bam_data, bam_path, bq_cutoff, boi, expect
             mv_stride_mismatch += 1
             continue
 
+        boi_fwd = boi.upper()
+        boi_strand = _BASE_COMPLEMENT.get(boi_fwd, boi_fwd) if read.is_reverse else boi_fwd
         ap = np.array(read.get_aligned_pairs(matches_only=True, with_seq=True), dtype=object)
-        ap = ap[ap[:, 2] == boi][:, :2].astype(np.int32)
+        ap = ap[ap[:, 2] == boi_strand][:, :2].astype(np.int32)
         if len(ap) == 0:
             continue
         read_id = uuid.UUID(str(read.query_name))
@@ -601,6 +639,24 @@ def segment_normalize_signal(
             if len(signal_df) == 0:
                 continue
 
+            ## Present reverse-strand reads in RNA-sense orientation.
+            #
+            # The model is trained only on RNA-sense, base-of-interest-centred
+            # context. `signal`/`dwell_token` are already in basecalled
+            # (RNA-sense 5'->3') order for both strands. The BAM, however,
+            # stores SEQ/QUAL of reverse-strand reads reverse-complemented into
+            # forward-reference order, and get_aligned_pairs returns forward-
+            # reference q_pos. So for reverse-strand reads bring seq/bq/q_pos
+            # into RNA-sense: reverse-complement seq, reverse bq, and mirror
+            # q_pos (q_pos is mirrored below, once q_len is known). signal and
+            # dwell_token are left untouched (already RNA-sense).
+            rev_mask = signal_df["strand"] == -1
+            if rev_mask.any():
+                signal_df.loc[rev_mask, "seq"] = signal_df.loc[rev_mask, "seq"].apply(
+                    lambda s: _ASCII_COMPLEMENT[s][::-1]
+                )
+                signal_df.loc[rev_mask, "bq"] = signal_df.loc[rev_mask, "bq"].apply(lambda q: q[::-1])
+
             ## Explode read-level data to base-level data
             signal_df = (
                 signal_df[["read_id", "strand", "bq", "seq", "signal", "dwell_token", "ref", "ap"]]
@@ -614,12 +670,20 @@ def segment_normalize_signal(
             # derive positions and lengths
             signal_df["q_pos"] = signal_df["ap"].apply(lambda x: x[0])
             signal_df["r_pos"] = signal_df["ap"].apply(lambda x: x[1])
+            signal_df["q_len"] = signal_df["seq"].apply(len)
+            # Mirror q_pos for reverse-strand reads so it indexes the RNA-sense
+            # (basecalled) coordinate system, matching the now sense-oriented
+            # seq/bq and the already sense-ordered signal/dwell arrays.
+            signal_df["q_pos"] = np.where(
+                signal_df["strand"] == -1,
+                signal_df["q_len"] - 1 - signal_df["q_pos"],
+                signal_df["q_pos"],
+            )
             signal_df["start_pos"] = signal_df["q_pos"] - cb_half_len
             signal_df["end_pos"] = signal_df["q_pos"] + cb_half_len + 1
-            signal_df["q_len"] = signal_df["seq"].apply(len)
             signal_df["label_id"] = (signal_df["ref"] * label_div + signal_df["r_pos"] + 1) * signal_df["strand"]
 
-            # filter by context
+            # filter by context (strand-uniform: all arrays are RNA-sense)
             signal_df = signal_df[
                 (signal_df["start_pos"] >= 0) & (signal_df["end_pos"] + dwell_shift - trim < signal_df["q_len"])
             ]
@@ -627,6 +691,9 @@ def segment_normalize_signal(
                 continue
             # slice tokens
             signal_df["signal"] = signal_df.apply(lambda x: x["signal"][x["start_pos"] : x["end_pos"]], axis=1)
+            # Motor leads the pore by `dwell_shift` bases; dwell_token is in
+            # basecalled (RNA-sense) order for both strands, so the offset is
+            # +dwell_shift uniformly.
             signal_df["dwell_motor_token"] = signal_df.apply(
                 lambda x: x["dwell_token"][(x["start_pos"] + dwell_shift + trim) : (x["end_pos"] + dwell_shift - trim)],
                 axis=1,

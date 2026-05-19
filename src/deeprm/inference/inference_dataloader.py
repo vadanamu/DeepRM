@@ -228,9 +228,14 @@ class NanoporeDataset(IterableDataset):
         Returns:
             int: Number of shards in the dataset.
         """
-        # Must match the total number of samples yielded across all workers
-        # for this rank-specific DataLoader instance.
-        return len(self._get_partition(worker_info=None))
+        # Total samples yielded across all DataLoader workers for this rank.
+        # Must NOT be subdivided by worker count: each worker iterates its own
+        # slice and DataLoader._num_yielded sums them, so len() is compared
+        # against the rank-local total, not a per-worker share.
+        rank_file_paths = self.file_paths[self.rank :: max(1, self.num_replicas)]
+        if self.resume_from:
+            rank_file_paths = rank_file_paths[self.resume_from :]
+        return len(rank_file_paths)
 
 
 class NanoporeDataLoader(DataLoader):

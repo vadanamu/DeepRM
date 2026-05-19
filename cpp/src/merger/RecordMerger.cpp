@@ -21,6 +21,22 @@
 #include <unordered_map>
 
 namespace deeprm {
+  namespace {
+    // Watson-Crick complement for reverse-complementing the query_sequence of
+    // reverse-strand reads back into RNA-sense orientation. Non-ACGT (e.g.
+    // 'N') is passed through unchanged.
+    uint8_t complement_base(uint8_t b)
+    {
+      switch (b) {
+        case 'A': return 'T';
+        case 'T': return 'A';
+        case 'C': return 'G';
+        case 'G': return 'C';
+        default:  return b;
+      }
+    }
+  } // namespace
+
   RecordMerger::RecordMerger(const NormalizationFactors& nf, int cb_len, int kmer_len,
                              int max_token_len, int sampling, int dwell_shift, int sig_window,
                              uint64_t label_div)
@@ -70,6 +86,31 @@ namespace deeprm {
       return false;
     }
 
+    // Present reverse-strand reads in RNA-sense orientation. The model is
+    // trained only on RNA-sense, base-of-interest-centred context.
+    // signal_segments / dwell_token are already in basecalled (RNA-sense
+    // 5'->3') order for both strands. The BAM stores SEQ/QUAL of reverse-
+    // strand reads reverse-complemented into forward-reference order, and
+    // ap.first (q_pos) is forward-reference. So for reverse-strand reads
+    // reverse-complement seq, reverse bq, and mirror q_pos; signal/dwell are
+    // left untouched.
+    const int q_len = static_cast<int>(bam_rec.seq.size());
+    const bool is_rev = (bam_rec.strand == -1);
+
+    vector<uint8_t> sense_seq;
+    vector<uint8_t> sense_bq;
+    const vector<uint8_t>* useq = &bam_rec.seq;
+    const vector<uint8_t>* ubq = &bam_rec.bq;
+    if (is_rev) {
+      sense_seq.resize(q_len);
+      for (int i = 0; i < q_len; ++i) {
+        sense_seq[i] = complement_base(bam_rec.seq[q_len - 1 - i]);
+      }
+      sense_bq.assign(bam_rec.bq.rbegin(), bam_rec.bq.rend());
+      useq = &sense_seq;
+      ubq = &sense_bq;
+    }
+
     // Process each aligned pair
     int cb_half_len = cb_len / 2;
     int trim = kmer_len / 2;
@@ -81,11 +122,17 @@ namespace deeprm {
       int q_pos = ap.first;
       int r_pos = ap.second;
 
+      // Mirror q_pos into the RNA-sense (basecalled) coordinate system for
+      // reverse-strand reads, matching sense seq/bq and the already
+      // sense-ordered signal/dwell arrays.
+      if (is_rev) {
+        q_pos = q_len - 1 - q_pos;
+      }
+
       int start_pos = q_pos - cb_half_len;
       int end_pos = q_pos + cb_half_len + 1;
-      int q_len = static_cast<int>(bam_rec.seq.size());
 
-      // Filter by context
+      // Filter by context (strand-uniform: all arrays are RNA-sense)
       if (start_pos < 0 || end_pos + dwell_shift - trim >= q_len) {
         continue;
       }
@@ -139,12 +186,14 @@ namespace deeprm {
 
       proc_rec.signal_token = signal_block;
 
-      // Extract k-mer tokens
+      // Extract k-mer tokens (RNA-sense seq for reverse-strand reads)
       proc_rec.kmer_token = vector<uint8_t>(
-        bam_rec.seq.begin() + start_pos,
-        bam_rec.seq.begin() + end_pos);
+        useq->begin() + start_pos,
+        useq->begin() + end_pos);
 
-      // Extract dwell tokens
+      // Extract dwell tokens. Motor leads the pore by dwell_shift bases;
+      // dwell_token is in basecalled (RNA-sense) order for both strands, so
+      // the offset is +dwell_shift uniformly.
       if (start_pos + dwell_shift + trim < static_cast<int>(dwell_token.size()) &&
         end_pos + dwell_shift - trim <= static_cast<int>(dwell_token.size())) {
         proc_rec.dwell_motor_token = vector<float>(
@@ -159,12 +208,12 @@ namespace deeprm {
           dwell_token.begin() + end_pos - trim);
       }
 
-      // Extract base quality
-      if (start_pos + trim < static_cast<int>(bam_rec.bq.size()) &&
-        end_pos - trim <= static_cast<int>(bam_rec.bq.size())) {
+      // Extract base quality (RNA-sense bq for reverse-strand reads)
+      if (start_pos + trim < static_cast<int>(ubq->size()) &&
+        end_pos - trim <= static_cast<int>(ubq->size())) {
         proc_rec.bq_token = vector<uint8_t>(
-          bam_rec.bq.begin() + start_pos + trim,
-          bam_rec.bq.begin() + end_pos - trim);
+          ubq->begin() + start_pos + trim,
+          ubq->begin() + end_pos - trim);
 
         // Clip quality values
         for (uint8_t& q : proc_rec.bq_token) {

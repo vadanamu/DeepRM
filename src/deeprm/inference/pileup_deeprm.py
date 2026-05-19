@@ -630,6 +630,14 @@ def bed_formatter(ref_names, ref_pos, ref_strand, modscore, stoichiometry, count
     return None
 
 
+_RC_TABLE = str.maketrans("ACGTNacgtn", "TGCANtgcan")
+
+
+def reverse_complement(seq: str) -> str:
+    """Reverse-complement a DNA string (non-ACGTN chars are passed through)."""
+    return seq.translate(_RC_TABLE)[::-1]
+
+
 def get_mm_tag(q_pos, preds, seq, base="A", mod="a"):
     q_pos = np.asarray(q_pos, dtype=np.int64)
     preds = np.asarray(preds, dtype=np.uint8)
@@ -696,7 +704,19 @@ def write_modbam_worker_from_map(in_path, out_path, data_map):
                 qpos.append(q)
                 pred.append(p)
 
-        mm_tag, ml_tag = get_mm_tag(qpos, pred, str(read.query_sequence))
+        # MM/ML are defined relative to the ORIGINAL (basecalled) read
+        # orientation. For reverse-strand alignments the BAM stores SEQ
+        # reverse-complemented and get_aligned_pairs' query positions index
+        # that forward-reference SEQ, so recover the original orientation:
+        # reverse-complement SEQ and mirror the query positions. The modified
+        # base is the RNA adenosine ('A') in that original orientation.
+        seq = str(read.query_sequence)
+        if read.is_reverse:
+            qlen = len(seq)
+            seq = reverse_complement(seq)
+            qpos = [qlen - 1 - q for q in qpos]
+
+        mm_tag, ml_tag = get_mm_tag(qpos, pred, seq)
         read.set_tag("MM", mm_tag, "Z")
         if len(ml_tag) > 0:
             read.set_tag("ML", ml_tag)

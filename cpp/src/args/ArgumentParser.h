@@ -55,7 +55,11 @@ struct Arguments {
     process_once = 1000;
     dwell_shift = 10;
     sig_window = 5;
-    filter_flag = 276;  // unmapped 4 + reversed 16  non-primary 256
+    // Default 276 = unmapped 4 + reversed 16 + secondary 256 (transcriptome-
+    // mapped BAMs: drop antisense). Use 260 (unmapped 4 + secondary 256) for
+    // genome-mapped BAMs so minus-strand-gene reads are kept and processed in
+    // RNA-sense.
+    filter_flag = 276;
     label_div = 1000000000ULL;
     consistency = false;
   }
