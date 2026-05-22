@@ -1,6 +1,6 @@
 /***************************************************************************************************
  *
- * Copyright (C) 2025 Genome4me Incorporated - All Rights Reserved.
+ * Copyright (C) 2025-2026 Genome4me Incorporated - All Rights Reserved.
  *
  * This software, including its source code, embedded concepts, and associated
  * documentation, is proprietary to Genome4me Incorporated and is protected
@@ -44,6 +44,7 @@ namespace deeprm {
     string bam_path;
     int bq_cutoff;
     char base_of_interest;
+    int filter_flag;  // SAM flag bits to exclude (matches MergedDataWorker no-C path)
     unordered_map<string, int> ref_index_dict;
 
     vector<pair<int32_t, int32_t>> get_aligned_pairs(bam1_t* read, char boi);
@@ -52,7 +53,7 @@ namespace deeprm {
     uint32_t get_md_reference_length(const char* md_tag);
 
   public:
-    BamReader(const string& path, int bq_threshold, char boi,
+    BamReader(const string& path, int bq_threshold, char boi, int filter_flag,
               unordered_map<string, int>& ref_index_dict);
     ~BamReader();
 

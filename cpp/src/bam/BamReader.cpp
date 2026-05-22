@@ -1,6 +1,6 @@
 /***************************************************************************************************
  *
- * Copyright (C) 2025 Genome4me Incorporated - All Rights Reserved.
+ * Copyright (C) 2025-2026 Genome4me Incorporated - All Rights Reserved.
  *
  * This software, including its source code, embedded concepts, and associated
  * documentation, is proprietary to Genome4me Incorporated and is protected
@@ -22,10 +22,10 @@
 #include <utility>
 
 namespace deeprm {
-  BamReader::BamReader(const string& path, int bq_threshold, char boi,
+  BamReader::BamReader(const string& path, int bq_threshold, char boi, int filter_flag,
                        unordered_map<string, int>& ref_index_dict)
     : bam_path(path), bq_cutoff(bq_threshold), base_of_interest(boi),
-      ref_index_dict(ref_index_dict)
+      filter_flag(filter_flag), ref_index_dict(ref_index_dict)
   {
   }
 
@@ -370,8 +370,21 @@ namespace deeprm {
 
   void BamReader::process_read(bam1_t* read, vector<BamRecord>& records)
   {
+    // BAM_FUNMAP and l_qseq==0 are unconditional safety checks: downstream
+    // code dereferences reference and sequence, so an unmapped record (tid
+    // == -1, no CIGAR) or a sequence-less secondary alignment (the BAM
+    // standard stores secondaries with seq='*', i.e. l_qseq==0) would
+    // crash. The default `-g 276` happens to mask both via its 4 (UNMAP)
+    // and 256 (SECONDARY) bits, but any user-supplied -g value missing
+    // them — e.g. `-g 0`, `-g 4`, `-g 16` — would let the unsafe records
+    // through. These two checks make the path safe for any -g value.
+    //
+    // filter_flag is then the user-tunable SAM-flag mask, kept identical to
+    // MergedDataWorker's no-C path so that -C and no-C produce the same
+    // record set for any -g value.
     if (read->core.flag & BAM_FUNMAP) return;
     if (read->core.l_qseq == 0) return;
+    if (read->core.flag & filter_flag) return;
 
     // Check for mv tag
     uint8_t* mv_tag = bam_aux_get(read, "mv");

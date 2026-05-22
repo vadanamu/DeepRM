@@ -97,7 +97,8 @@ void process_bam_worker(int worker_id, int num_workers, const Arguments& args,
 {
   log_info() << "Starting BAM worker " << worker_id << endl;
 
-  BamReader reader(args.bam_path, args.qcut, args.base_of_interest, ref_index_dict);
+  BamReader reader(args.bam_path, args.qcut, args.base_of_interest,
+                   args.filter_flag, ref_index_dict);
   auto records = reader.parse_bam(worker_id, num_workers, args.bam_threads);
 
   size_t record_count = records.size(); // Save size before move

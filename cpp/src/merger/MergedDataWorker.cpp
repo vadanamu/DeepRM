@@ -1,6 +1,6 @@
 /***************************************************************************************************
  *
- * Copyright (C) 2025 Genome4me Incorporated - All Rights Reserved.
+ * Copyright (C) 2025-2026 Genome4me Incorporated - All Rights Reserved.
  *
  * This software, including its source code, embedded concepts, and associated
  * documentation, is proprietary to Genome4me Incorporated and is protected
@@ -222,6 +222,18 @@ namespace deeprm {
   bool MergedDataWorker::convert_bam1_to_record(bam1_t* read, sam_hdr_t* header,
                                                 BamRecord& record) const
   {
+    // BAM_FUNMAP and l_qseq==0 are unconditional safety checks: downstream
+    // code dereferences reference and sequence, so an unmapped record (tid
+    // == -1, no CIGAR) or a sequence-less secondary alignment (the BAM
+    // standard stores secondaries with seq='*', i.e. l_qseq==0) would
+    // crash. The default `-g 276` happens to mask both via its 4 (UNMAP)
+    // and 256 (SECONDARY) bits, but any user-supplied -g value missing
+    // them — e.g. `-g 0`, `-g 4`, `-g 16` — would let the unsafe records
+    // through. These two checks make the path safe for any -g value.
+    if (read->core.flag & BAM_FUNMAP)
+      return false;
+    if (read->core.l_qseq == 0)
+      return false;
     if (read->core.flag & args.filter_flag)
       return false;
 
