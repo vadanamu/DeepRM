@@ -18,3 +18,4 @@ __pycache__/
 docs/_build/
 /src/deeprm.egg-info/
 /src/deeprm/inference/inference_preprocess_python_high_priority.patch
+/.claude/settings.local.json

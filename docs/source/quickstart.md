@@ -1,50 +1,42 @@
 # 🚀 Quickstart
-* For demonstration purposes, you can use examples POD5 and BAM files provided in the `examples` directory of the repository.
-* You can also use your own POD5 and BAM files.
+* The repository has example data in `example/`. Run the commands below from the repository folder.
+* The inference example (`example/call-example`) holds 10,225 HEK293T mRNA reads, basecalled with `rna004_sup@v6.0.0`
+  and aligned to transcripts.
+* To run your own POD5 files, see {doc}`usage`.
 
 ## RNA Modification Detection
-* Estimated time: ~1 hours
+* Estimated time: about 3 minutes on one B200 GPU.
 
 1️⃣ **Prepare data**
 ```bash
-deeprm call prep -p inference_example.pod5 -b inference_example.bam -o <prep_dir>
+deeprm call prep -p example/call-example/call_example_pod5 -b example/call-example/call_example.bam -o <prep_dir>
 ```
-* (Alternative) To supply your own POD5 file:
-  ```bash
-  dorado basecaller --reference <ref_fasta> --min-qscore 0 --emit-moves rna004_130bps_sup@v5.0.0 <pod5_dir> \
-  | tee >(samtools sort -@ <threads> -O BAM -o <bam_path> - && samtools index -@ <threads> <bam_path>) \
-  | deeprm call prep -p <pod5_dir> -b - -o <prep_dir>
-  ```
-    * If Dorado fails due to "illegal memory access", try adding `--chunksize <chunk_size>` option (e.g., chunk_size=12000).
 
 2️⃣ **Run inference**
 ```bash
-deeprm call run -b inference_example.bam -i <prep_dir> -o <pred_dir> -s 1000
+deeprm call run -b example/call-example/call_example.bam -i <prep_dir> -o <pred_dir>
 ```
-* Adjust the `-s` (batch size) parameter according to your GPU memory capacity (default: 10000).
-* Expected output file:
-    *  Site-level detection result file (.bed)
-    *  Molecule-level detection result file (.npz)
+* The site-level result is `<pred_dir>/<prep_dir name>/site-level/pileup.bed`. All output files are listed in
+  {ref}`output-files`.
 
 ## Model Training
-* Estimated time: ~1 hours
+* Estimated time: about 1 hour.
 
 1️⃣ **Prepare unmodified & modified training data**
 ```bash
-deeprm train prep -p training_a_example.pod5 -b training_a_example.bam -o <prep_dir>/a
-deeprm train prep -p training_m6a_example.pod5 -b training_m6a_example.bam -o <prep_dir>/m6a
+deeprm train prep -p example/train-example/A/train_example_A_pod5 -b example/train-example/A/train_example_A.bam -o <prep_dir>/a
+deeprm train prep -p example/train-example/m6A/train_example_m6A_pod5 -b example/train-example/m6A/train_example_m6A.bam -o <prep_dir>/m6a
 ```
 
 2️⃣ **Compile training data**
 ```bash
-deeprm train compile -n <prep_dir>/a/data -p <prep_dir>/m6a/data -o <prep_dir>/compiled
+deeprm train compile -n <prep_dir>/a/data -p <prep_dir>/m6a/data -o <prep_dir>/compiled -c 1000
 ```
+* The example is small, so `-c 1000` writes smaller files than the default (4000). With the default, the
+  validation set would be empty and the command stops.
 
 3️⃣ **Run training**
 ```bash
-deeprm train run -d <prep_dir>/compiled -o <output_dir> --batch 64
+deeprm train run --data <prep_dir>/compiled --output <output_dir> --batch 64
 ```
-* Adjust the `--batch` parameter according to your GPU memory capacity (default: 1024).
-* Expected output file:
-  *  Trained DeepRM model file (.pt)
-
+* The run writes the trained model file (.pt). Training options: {doc}`usage`.

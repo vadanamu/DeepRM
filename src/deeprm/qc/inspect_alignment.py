@@ -40,15 +40,33 @@ def add_arguments(parser: argparse.ArgumentParser):
     Returns:
         None
     """
-    parser.add_argument("--input", "-i", type=str, dest="input", help="Input BAM file path", required=True)
-    parser.add_argument("--output", "-o", type=str, dest="output", help="Output Directory", required=True)
+    parser.add_argument("--input", "-i", type=str, dest="input", help="BAM file of aligned reads", required=True)
+    parser.add_argument("--output", "-o", type=str, dest="output", help="Output folder", required=True)
     parser.add_argument(
-        "--process", "-p", type=int, dest="process", help="Number of processes", default=int(mp.cpu_count() * 0.95 // 4)
+        "--process",
+        "-p",
+        type=int,
+        dest="process",
+        help="Number of worker processes (default: about a quarter of the CPUs)",
+        default=int(mp.cpu_count() * 0.95 // 4),
     )
-    parser.add_argument("--thread", "-t", type=int, dest="thread", help="Number of threads per process", default=4)
-    parser.add_argument("--mapq", "-m", type=int, dest="mapq", help="MAPQ cutoff", default=30)
-    parser.add_argument("--bq", "-b", type=int, dest="bq", help="BQ cutoff", default=7)
-    parser.add_argument("--min-len", "-l", type=int, dest="len_cutoff", help="Length cutoff", default=0)
+    parser.add_argument(
+        "--thread", "-t", type=int, dest="thread", help="BAM decompression threads per process", default=4
+    )
+    parser.add_argument(
+        "--mapq", "-m", type=int, dest="mapq", help="Skip reads with a mapping quality below this", default=30
+    )
+    parser.add_argument(
+        "--bq", "-b", type=int, dest="bq", help="Skip reads whose mean base quality is below this", default=7
+    )
+    parser.add_argument(
+        "--min-len",
+        "-l",
+        type=int,
+        dest="len_cutoff",
+        help="Skip reads shorter than this (0: keep all reads)",
+        default=0,
+    )
 
     return None
 
@@ -131,6 +149,7 @@ def extract_cigar_worker(pid, args, error_dict):
 def extract_cigar_master(args):
     """
     Master function to extract CIGAR strings and calculate error rates using multiprocessing.
+
     Args:
         args (argparse.Namespace): Parsed command line arguments.
     Returns:

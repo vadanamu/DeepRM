@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python: ['3.9', '3.12']
+        python: ['3.10', '3.12']
 
     steps:
       - name: Checkout
@@ -32,8 +32,10 @@ jobs:
       - name: Install project and tools
         run: |
           python -m pip install -U pip
-          python -m pip install -e .[docs,tests]  # install docs and tests extras
-          python -m pip install pytest 
+          # CPU PyTorch first (the model tests run on CPU); pip keeps it when it installs DeepRM, which pins
+          # torch==2.10.0 (2.10.0+cpu meets that pin)
+          python -m pip install "torch==2.10.0" --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e .[docs,test,train]  # docs, test and training (torchmetrics) extras
 
       - name: Smoke the CLI
         run: |
@@ -41,9 +43,8 @@ jobs:
           python -m deeprm call --help
 
       - name: Run tests
-        run: pytest -q
+        run: pytest -q -rs
 
       - name: Build docs
         run: |
-          python -m pip install torch torchmetrics
           python -m sphinx docs/source docs/build/html -W

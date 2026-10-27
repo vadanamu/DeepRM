@@ -1,6 +1,6 @@
 /***************************************************************************************************
  *
- * Copyright (C) 2025 Genome4me Incorporated - All Rights Reserved.
+ * Copyright (C) 2025-2026 Genome4me Incorporated - All Rights Reserved.
  *
  * This software, including its source code, embedded concepts, and associated
  * documentation, is proprietary to Genome4me Incorporated and is protected
@@ -15,48 +15,58 @@
 
 #pragma once
 
+#include <cstdint>
+
 #include <string>
 #include <vector>
-#include <unordered_map>
 #include <memory>
 #include <htslib/hts.h>
 #include <htslib/sam.h>
 
+#include "bam/BamRecord.h"
+#include "utils/Uuid128.h"
+
 using namespace std;
 
 namespace deeprm {
-  struct BamRecord {
-    string read_id; // 32 bytes
-    string parent_id; // 32 bytes
-    int32_t ts; // 4 bytes
-    int32_t ns; // 4 bytes
-    int32_t sp; // 4 bytes
-    int32_t ref; // 4 bytes
-    vector<uint8_t> seq; // 24 bytes
-    vector<uint8_t> bq; // 24 bytes
-    vector<pair<int32_t, int32_t>> ap; // 24 bytes
-    vector<bool> mv; // 40 bytes
-    int8_t strand; // 1 byte: -1 for reversed, 1 for not reversed
-  };
-
   class BamReader {
   private:
     string bam_path;
-    int bq_cutoff;
-    char base_of_interest;
-    unordered_map<string, int> ref_index_dict;
-
-    vector<pair<int32_t, int32_t>> get_aligned_pairs(bam1_t* read, char boi);
-    string build_alignment_sequence(bam1_t* read);
-    string build_reference_sequence(bam1_t* read);
-    uint32_t get_md_reference_length(const char* md_tag);
+    // SAM flag bits to exclude at harvest time. Record extraction itself lives
+    // in BamRecordExtractor, which phase 2 runs on the re-read record.
+    int filter_flag;
+    // Voffset range mode (as in the Python preprocessing): when set, harvest_offsets seeks
+    // to v_lo and consumes records until the first whose START voffset is
+    // >= v_hi (v_hi == 0 means "to EOF"), instead of the modulo scan.
+    bool ranged;
+    uint64_t v_lo;
+    uint64_t v_hi;
+    // Set when this reader's share could not be read in full (open, header, seek or a read error other
+    // than end of file); the run then fails instead of missing part of the BAM.
+    bool read_failed = false;
 
   public:
-    BamReader(const string& path, int bq_threshold, char boi,
-              unordered_map<string, int>& ref_index_dict);
+    BamReader(const string& path, int filter_flag);
     ~BamReader();
 
-    vector<BamRecord> parse_bam(int process_id, int num_processes, int num_threads);
-    void process_read(bam1_t* read, vector<BamRecord>& records);
+    // Lazy file-mode phase 1: walk this reader's share of the BAM and return
+    // (parent_id, record-start voffset) pairs for records passing the cheap
+    // pre-filter (empty SEQ, -g flag mask). No extraction happens here --
+    // phase 2 re-reads each record via bgzf_seek and runs the shared
+    // extractor, so the resident index shrinks from whole records (~14 KB
+    // each) to ~170 B per parent.
+    vector<pair<Uuid128, uint64_t>> harvest_offsets(int process_id,
+                                                   int num_processes,
+                                                   int num_threads);
+
+    bool failed() const { return read_failed; }
+
+    // Enable voffset range mode for this reader (the fast path).
+    void set_voffset_range(uint64_t lo, uint64_t hi)
+    {
+      ranged = true;
+      v_lo = lo;
+      v_hi = hi;
+    }
   };
 } // namespace deeprm

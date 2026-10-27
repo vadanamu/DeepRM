@@ -16,15 +16,12 @@ import math
 import os
 
 import numpy as np
+import torch
+from torch.utils.data import DataLoader, IterableDataset
 
-from deeprm.utils import check_deps
 from deeprm.utils.logging import get_logger
 
 log = get_logger(__name__)
-check_deps.check_torch_available()
-
-import torch
-from torch.utils.data import DataLoader, IterableDataset
 
 
 class BinaryClassDatasetIterator:
@@ -137,9 +134,8 @@ class BinaryClassDatasetIterator:
                         current_buffer[key_idx].append(npz[key])
                     len_buffer += len(npz[self.keys[0]])
             except Exception as e:
-                log.warning(
-                    f"Skipping file {self.paths[self.current_class][self.current_df_index[self.current_class]]} due to error: {e}"
-                )
+                path = self.paths[self.current_class][self.current_df_index[self.current_class]]
+                log.warning(f"Skipping file {path} due to error: {e}")
                 continue
 
         ## Concat and shuffle the data
@@ -527,7 +523,7 @@ class NanoporeDataLoader(DataLoader):
         neg_num_shard = int(pos_num_shard * dataset.class_ratio)
 
         per_rank_samples = (pos_num_shard + neg_num_shard) * dataset.disk_shard_size
-        return per_rank_samples // self.batch_size * self.num_workersl
+        return per_rank_samples // self.batch_size * self.num_workers
 
     def set_epoch(self, epoch: int) -> None:
         """

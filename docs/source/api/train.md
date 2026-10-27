@@ -12,12 +12,8 @@
 
 ### `train.extract_block`
 
-```{eval-rst}
-.. automodule:: deeprm.train.extract_block
-    :members:
-    :undoc-members:
-    :show-inheritance:
-```
+Context-block extraction for `deeprm train prep` (classes `DAGLevenshteinBlockExtractor` and
+`DAGPairwiseBlockExtractor`). Its documentation is in the source file.
 
 
 ### `train.train_compile`
@@ -42,12 +38,8 @@
 
 ### `train.train_preprocess`
 
-```{eval-rst}
-.. automodule:: deeprm.train.train_preprocess
-    :members:
-    :undoc-members:
-    :show-inheritance:
-```
+`deeprm train prep` (`add_arguments`, `main`). Its documentation is in the source file; `deeprm train prep -h` lists
+the options.
 
 
 ### `train.train`

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import signal
 import sys
 from argparse import RawTextHelpFormatter
 from importlib import import_module
@@ -14,34 +16,34 @@ from typing import Dict, List
 # -------------------------------------------------------------------
 _HELP_REGISTRY: Dict[str, dict] = {
     "call": {
-        "desc": "Call (inference) helpers",
+        "desc": "Call modifications (inference)",
         "module": "deeprm.inference.cli",
         "subcommands": [
-            ("prep", "Preprocess raw inputs for inference"),
-            ("run", "Run model inference on preprocessed data"),
-            ("pileup", "Aggregate predictions into site-level metrics"),
+            ("prep", "Preprocess POD5 and BAM files for inference"),
+            ("run", "Run the model on preprocessed data, then the pileup"),
+            ("pileup", "Aggregate per-read predictions into site-level results"),
         ],
     },
     "train": {
-        "desc": "Training utilities",
+        "desc": "Prepare training data and train a model",
         "module": "deeprm.train.cli",
         "subcommands": [
             ("prep", "Prepare training data"),
-            ("compile", "Compile training dataset"),
-            ("run", "Launch training (DDP supported)"),
+            ("compile", "Compile the training dataset"),
+            ("run", "Train a model on one or more GPUs"),
         ],
     },
     "qc": {
-        "desc": "Quality-control tools",
+        "desc": "Quality control",
         "module": "deeprm.qc.cli",
         "subcommands": [
-            ("run", "Basic QC summaries"),
-            ("alignment", "Inspect alignments and metrics"),
-            ("block", "Inspect block-level signals"),
+            ("run", "Plot read length, base quality and poly(A) length of a BAM"),
+            ("alignment", "Plot alignment error rates of a BAM"),
+            ("block", "Plot the training data of deeprm train prep or DeepRM v1.1"),
         ],
     },
     "check": {
-        "desc": "Verify installation",
+        "desc": "Check the installation",
         "module": "deeprm.utils.check_installation",
     },
 }
@@ -49,8 +51,11 @@ _HELP_REGISTRY: Dict[str, dict] = {
 
 def resolved_version() -> str:
     try:
-        return version("deeprm")
-    except PackageNotFoundError:
+        found = version("deeprm")
+        if not found:  # an incomplete egg-info, as in an unpacked sdist run with src on the path
+            raise PackageNotFoundError("deeprm")
+        return found
+    except (PackageNotFoundError, KeyError):
         # Editable/uninstalled checkouts
         try:
             from . import __version__  # type: ignore
@@ -124,6 +129,10 @@ def _build_top_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: List[str] | None = None) -> int:
+    # A parent that ignores SIGCHLD passes that on to this process, and then no child's exit status can be read:
+    # subprocess reports 0 for a preprocessing binary or a --bam-cmd command that failed, so the run would succeed.
+    if hasattr(signal, "SIGCHLD") and signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN:
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = _build_top_parser()
 
@@ -145,7 +154,23 @@ def main(argv: List[str] | None = None) -> int:
 
     mod = import_module(group_info["module"])
     # Delegate the remaining argv to the group's entry() function
-    return int(mod.entry(rest) or 0)
+    try:
+        return int(mod.entry(rest) or 0)
+    except ModuleNotFoundError as exc:
+        # The commands import PyTorch when they start (inside entry()). Without it, say how to install it.
+        if exc.name != "torch":
+            raise
+        from deeprm.utils import check_deps
+
+        print(f"PyTorch is not installed. Install it with: {check_deps.torch_install_hint()}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        # DeepRM refuses bad arguments and unusable setups with ValueError: print the reason, not a traceback
+        if os.environ.get("DEEPRM_TRACEBACK", "") == "1":
+            raise
+        print(f"deeprm {ns.group}: error: {exc}", file=sys.stderr)
+        print("(set DEEPRM_TRACEBACK=1 to see where it was raised)", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

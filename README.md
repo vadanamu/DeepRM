@@ -9,10 +9,45 @@
 ![GitHub language count](https://img.shields.io/github/languages/count/vadanamu/DeepRM)
 ![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17636697.svg)
 
-![deeprm.png](docs/images/deeprm.png)
+![deeprm.png](https://raw.githubusercontent.com/vadanamu/DeepRM/public/docs/images/deeprm.png)
+
+## ✨ Introduction
+DeepRM is a deep learning-based framework for RNA modification detection using Nanopore direct RNA sequencing.
+This repository contains the source code for training and running DeepRM.
+
+## 🆕 What's new in v1.2
+DeepRM v1.2 uses substantially less memory, runs faster and detects RNA modifications more accurately.
+
+**1. Substantially lower memory usage and higher speed**
+* The preprocessing uses 8 to 13 times less peak memory than DeepRM v1.1's.
+* With input on a local SSD, the preprocessing runs 2 to 2.5 times as fast as DeepRM v1.1's. Run on Dorado's output
+  while Dorado basecalls, it finishes when basecalling does, so it adds no time to the run.
+* Inference is 1.9 to 3.0 times as fast as DeepRM v1.1 on A100, H100 and B200 GPUs.
+
+**2. Improved RNA modification detection accuracy**
+* Higher m6A recall, most of all for clustered m6A (the nearest other m6A 1–4 nt away): 95.7 %, against 85.8 % with
+  DeepRM v1.1 and 78.9 % with Dorado (v6.0.0 SUP), at the same false positive rate.
+* Oxford Nanopore Technologies' all-5-mer synthetic RNA dataset: AU-PR 0.933, against 0.883 with DeepRM v1.1 and 0.923
+  with Dorado.
+* HEK293T benchmark of the DeepRM paper: AU-PR 0.964 at DRACH and 0.716 at non-DRACH sites, against 0.961 and 0.704 with
+  DeepRM v1.1, and 0.959 and 0.161 with Dorado.
+
+Benchmark details and the full list of changes: [📜 Changelog](https://github.com/vadanamu/DeepRM/blob/public/CHANGELOG.md).
+
+## ⚡ Quick installation
+In a new Python environment (Python 3.10 or newer) on Linux x86_64:
+```bash
+pip install deeprm
+deeprm check
+```
+* `deeprm check` reports any problem it finds, with the command that fixes it.
+* With uv: `uv pip install deeprm`.
+* Other setups: see [Installation](#-installation).
 
 ## Table of Contents
 * [✨ Introduction](#-introduction)
+* [🆕 What's new in v1.2](#-whats-new-in-v12)
+* [⚡ Quick installation](#-quick-installation)
 * [🎯 Key Features](#-key-features)
 * [📦 Installation](#-installation)
 * [🚀 Quickstart](#-quickstart)
@@ -20,299 +55,172 @@
   * [Inference](#inference-usage)
   * [Training](#training-usage)
 * [🔧 Troubleshooting](#-troubleshooting)
-* [📐 Architecture](#-architecture)
 * [📝 Citation](#-citation)
 * [📝 License](#-license)
-* [🏛️ Contributors](#-contributors)
-* [🏛️ Acknowledgements](#-acknowledgements)
+* [🏛 Contributors](#-contributors)
+* [🏛 Acknowledgements](#-acknowledgements)
 
-
-## ✨ Introduction
-DeepRM is a deep learning-based framework for RNA modification detection using Nanopore direct RNA sequencing.
-This repository contains the source code for training and running DeepRM.
+📚 Full documentation: https://deeprm.readthedocs.io/
 
 ## 🎯 Key Features
 * **High accuracy**: Achieves state-of-the-art accuracy in RNA modification detection and stoichiometry measurement.
 * **Single-molecule resolution**: Provides single-molecule level predictions for RNA modifications.
-* **End-to-end pipeline**: Easy-to-use pipeline from raw reads to site-level predictions.
+* **End-to-end pipeline**: Easy-to-use pipeline from raw reads to molecule-level and site-level predictions.
+* **Fast**: Compiled inference and a fast C++ preprocessing.
 * **Customizable**: Supports training of custom models.
 
 ## 📦 Installation
 ### Prerequisites
-* Linux x86_64
-* Python 3.9+
-* Pytorch 2.3+
-  * https://pytorch.org/get-started/locally/
-  * Please ensure that you have installed the correct version of PyTorch with CUDA support if you want to use GPU for inference or training.
-
-#### Optional
-* Torchmetrics 0.9.0+ (only for training)
-  * ```bash
-    python -m pip install torchmetrics
-    ```
-* Dorado 0.7.3+ (optional, for basecalling)
-  * https://github.com/nanoporetech/dorado
-* SAMtools 1.16.1+ (optional, for BAM file processing)
-  * http://www.htslib.org/
-
-* Python package requirements are listed in `requirements.txt` and will be installed automatically when you install DeepRM.
+* Linux x86_64 with glibc 2.28 or newer (Ubuntu 20.04, Debian 10, RHEL, Rocky or Alma 8, or newer)
+* Python 3.10+
+* An NVIDIA GPU: recommended for inference (which also runs on the CPU, more slowly), required for training.
+* Optional: [Dorado](https://github.com/nanoporetech/dorado) 2.0.0 (basecalling) and
+  [SAMtools](http://www.htslib.org/) 1.16.1+ (BAM files).
 
 ### Installation options
-* Estimated time: ~10 minutes
-1. Install via PIP (recommended)
+* Estimated time: ~10 minutes. Use a new environment: DeepRM installs PyTorch 2.10.0 and replaces any other version.
+
+1. With pip: see [Quick installation](#-quick-installation).
+
+2. With uv, using uv's own Python (it has the C headers needed to compile the model):
 ```bash
-python -m pip install deeprm
+uv venv --python 3.12 --python-preference only-managed deeprm-env && source deeprm-env/bin/activate
+uv pip install deeprm
 ```
 
-2. Install from source (GitHub)
-
+3. From source:
 ```bash
 git clone https://github.com/vadanamu/deeprm
 cd deeprm
-python -m pip install -U pip
-python -m pip install -e .
+pip install -e .
 ```
- * If installation fails on old OS (e.g., CentOS 7) due to NumPy, you can try installing older versions of NumPy first:
- * ```bash
-    python -m pip install "numpy<2.3.0,>2.0.0"
-    python -m pip install -e .
-    ```
+
+* For training: `pip install "deeprm[train]"`.
+* Older GPUs, CPU-only and other setups:
+  [Advanced installation](https://deeprm.readthedocs.io/en/latest/advanced-installation.html).
 
 ### Verify Installation
-
 ```bash
 deeprm --version
 deeprm check
 ```
- * If everything is installed correctly, you should see the version of DeepRM and a message indicating that the installation is successful.
- * If you encounter CUDA or torch-related errors, make sure you have installed the correct version of PyTorch with CUDA support.
-
-### Build from Source
-* DeepRM can use a C++-based preprocessing tool for acceleration, which is both provided as a precompiled binary and source code.
-* Depending on your system configuration, you may need to build the C++ preprocessing tool from source, located in the `cpp` directory of the DeepRM repository.
-* Please refer to the [cpp/README.md](cpp/README.md) page for detailed build instructions.
+* With no problem found, `deeprm check` prints "Environment checks passed successfully."
 
 ## 🚀 Quickstart
-* For demonstration purposes, you can use examples POD5 and BAM files provided in the `examples` directory of the repository.
-* You can also use your own POD5 and BAM files.
+* Example POD5 and BAM files are in the repository's `example` folder (pip does not install them). Run the commands
+  below from the repository folder.
 
 ### RNA Modification Detection
-* Estimated time: ~1 hours
+* Estimated time: about 3 minutes on one B200 GPU.
 
 1️⃣ **Prepare data**
 ```bash
-deeprm call prep -p inference_example.pod5 -b inference_example.bam -o <prep_dir>
+deeprm call prep -p example/call-example/call_example_pod5 -b example/call-example/call_example.bam -o <prep_dir>
 ```
-* (Alternative) To supply your own POD5 file:
+* (Alternative) Basecall your own POD5 files and prepare them in one pass:
   ```bash
-  dorado basecaller --reference <ref_fasta> --min-qscore 0 --emit-moves rna004_130bps_sup@v5.0.0 <pod5_dir> \
+  dorado basecaller --reference <ref_fasta> --chunksize 12000 --min-qscore 0 --emit-moves --estimate-poly-a rna004_sup@v6.0.0 <pod5_dir> \
   | tee >(samtools sort -@ <threads> -O BAM -o <bam_path> - && samtools index -@ <threads> <bam_path>) \
   | deeprm call prep -p <pod5_dir> -b - -o <prep_dir>
   ```
-    * If Dorado fails due to "illegal memory access", try adding `--chunksize <chunk_size>` option (e.g., chunk_size=12000).
-
+    * Keep `rna004_sup@v6.0.0` and `--chunksize 12000`: the model expects reads basecalled this way.
 
 2️⃣ **Run inference**
 ```bash
-deeprm call run -b inference_example.bam -i <prep_dir> -o <pred_dir> -s 1000
+deeprm call run -b example/call-example/call_example.bam -i <prep_dir> -o <pred_dir>
 ```
-* Adjust the `-s` (batch size) parameter according to your GPU memory capacity (default: 10000).
-* Expected output file:
-    *  Site-level detection result file (.bed)
-    *  Molecule-level detection result file (.npz)
+* Results: `<pred_dir>/<prep_dir name>/` (see [Output files](#output-files)).
 
 ### Model Training
-* Estimated time: ~1 hours
+* Estimated time: ~1 hour
 
 1️⃣ **Prepare unmodified & modified training data**
 ```bash
-deeprm train prep -p training_a_example.pod5 -b training_a_example.bam -o <prep_dir>/a
-deeprm train prep -p training_m6a_example.pod5 -b training_m6a_example.bam -o <prep_dir>/m6a
+deeprm train prep -p example/train-example/A/train_example_A_pod5 -b example/train-example/A/train_example_A.bam -o <prep_dir>/a
+deeprm train prep -p example/train-example/m6A/train_example_m6A_pod5 -b example/train-example/m6A/train_example_m6A.bam -o <prep_dir>/m6a
 ```
 
 2️⃣ **Compile training data**
 ```bash
-deeprm train compile -n <prep_dir>/a/data -p <prep_dir>/m6a/data -o <prep_dir>/compiled
+deeprm train compile -n <prep_dir>/a/data -p <prep_dir>/m6a/data -o <prep_dir>/compiled -c 1000
 ```
+* `-c 1000` suits this small example (default: 4000).
 
 3️⃣ **Run training**
 ```bash
-deeprm train run -d <prep_dir>/compiled -o <output_dir> --batch 64
+deeprm train run --data <prep_dir>/compiled --output <output_dir> --batch 64
 ```
-* Adjust the `--batch` parameter according to your GPU memory capacity (default: 1024).
-* Expected output file:
-    *  Trained DeepRM model file (.pt)
+* The output is a model file (.pt).
+* This trains the v1.2 architecture (deeprm_v12) from scratch. The training data and methods of the released weights
+  are reserved for a future publication.
 
 
 ## 💻 Usage
 ### Inference usage
-![deeprm_inference_pipeline.png](docs/images/deeprm_inference_pipeline.png)
+![deeprm_inference_pipeline.png](https://raw.githubusercontent.com/vadanamu/DeepRM/public/docs/images/deeprm_inference_pipeline.png)
 
-#### Prepare Data
-##### Accelerated preparation (recommended, default)
-* This method uses precompiled C++ binary for accelerating the preprocessing step.
-  ```bash
-  dorado basecaller --reference <ref_fasta> --min-qscore 0 --emit-moves rna004_130bps_sup@v5.0.0 <pod5_dir> \
-  | tee >(samtools sort -@ <threads> -O BAM -o <bam_path> - && samtools index -@ <threads> <bam_path>) \
-  | deeprm call prep -p <pod5_dir> -b - -o <prep_dir>
-  ```
-* If Dorado fails due to "illegal memory access", try adding `--chunksize <chunk_size>` option (e.g., chunk_size=12000).
-* If the precompiled binary does not work on your system, please refer to the [cpp/README.md](cpp/README.md) page for detailed build instructions.
-* Adjust the `-g (--filter-flag)` parameter according to your needs. If using a genomic reference, you may want to use `-g 260`.
-
-##### Sequential preparation
-* This method is slower than the accelerated preparation method, but is supported for cases such as:
-    * The POD5 files are already basecalled to BAM files with move tags.
-    * You want to run basecalling and preprocessing in separate machines.
-
-* Basecall the POD5 files to BAM files with move tags (skip if already done):
-  * If Dorado fails due to "illegal memory access", try adding `--chunksize <chunk_size>` option (e.g., chunk_size=12000).
+* Prepare data with `deeprm call prep` as in the [Quickstart](#-quickstart). For reads aligned to a genome, add `-g 260`.
+  Other ways: [Usage](https://deeprm.readthedocs.io/en/latest/usage.html).
+* Run inference with the bundled v1.2 model:
 ```bash
-dorado basecaller --reference <reference_path> --min-qscore 0 --emit-moves rna004_130bps_sup@v5.0.0 <pod5_dir> > <raw_bam_path>"
+deeprm call run --input <prep_dir> --bam <bam_path> --output <prediction_dir> --gpu-pool <gpu_pool>
 ```
-* Filter, sort, and index the BAM files:
-  * Adjust the `-F` parameter according to your needs. If using a genomic reference, you may want to use `-F 260`.
-```bash
-samtools view -@ <threads> -bh -F 276 -o <bam_path> <raw_bam_path>
-samtools sort -@ <threads> -o <bam_path> <bam_path>
-samtools index -@ <threads> <bam_path>
-```
-* To preprocess the inference data (transcriptome), run the following command:
-```bash
-deeprm call prep -p <input_POD5_dir> -b <bam_path> -o <prep_dir>
-```
-* This will create the npz files for inference.
+* `--annot <annotation_file>` (RefFlat, GenePred or RefGene) also writes genomic coordinates, for reads aligned to
+  transcripts.
+* `--model <model_file>` runs a model made with `deeprm train run`. DeepRM v1.1 model files need DeepRM v1.1
+  (`pip install deeprm==1.1.3`).
 
-#### Run Inference
-* The trained DeepRM model file is attached in the repository: `weight/deeprm_weights.pt`.
-* For inference, run the following command:
-    * Adjust the `-s` (batch size) parameter according to your GPU memory capacity (default: 10000).
-```bash
-deeprm call run --model <model_file> --data <data_dir> --output <prediction_dir> --gpu-pool <gpu_pool>
-```
-* This will create a directory with the site-level and molecule-level result files.
-* Optionally, if you used a transcriptomic reference for alignment, you can convert the result to genomic coordinates by supplying a RefFlat/GenePred/RefGene file (`--annot <annotation_file>`).
+#### Output files
+Under `<prediction_dir>/<prep_dir name>/`:
+* `site-level/pileup.bed`: one row per site ([bedMethyl](https://genome.ucsc.edu/goldenpath/help/bedMethyl.html)).
+  Column 5 is the modscore × 1000; column 11 is the stoichiometry (%), 0 where it is not reported.
+* `site-level/modbam_<input BAM name>`: per-read calls in MM/ML tags
+  ([SAMtags](https://samtools.github.io/hts-specs/SAMtags.pdf)).
+* `molecule-level/inference_*.npz`: per-read predictions.
+* All output files: [Usage](https://deeprm.readthedocs.io/en/latest/usage.html#output-files).
 
-#### Site-level BED file format
-* The output BED file follows the standard bedMethyl format. Please see https://genome.ucsc.edu/goldenpath/help/bedMethyl.html for description.
-* Please note that columns 14 to 18 are zero-filled for compatibility. These columns will be used for a planned future update.
-
-#### Molecule-level BAM file format
-* The output BAM file contains modification information in MM and ML tags. Please see https://samtools.github.io/hts-specs/SAMtags.pdf for description.
-
-#### Molecule-level NPZ file format (advanced usage)
-* The output NPZ file contains the following arrays:
-```text
-    1. read_id
-    2. label_id
-    3. pred: modification score (between 0 and 1)
-```
-* Read ID specification:
-    * The UUID4 format read ID (128 bits) is converted to two 64-bit integers for NumPy compatibility.
-    * You can convert the two 64-bit integers back to UUID4 using the following Python code:
-      ```python
-      import numpy as np
-      import uuid
-      def int_to_uuid(high, low):
-          return uuid.UUID(bytes=b"".join([high.tobytes(),low.tobytes()]))
-      ```
-* Label ID specification:
-    * Label ID contains the reference, position, and strand information.
-    * You can decode the label ID using the following Python code:
-    ```python
-    import numpy as np
-    def decode_label_id(label_id, label_div = 10**9):
-        strand = np.sign(label_id)
-        label_id_abs = np.abs(label_id) - 1
-        ref_id = label_id_abs // label_div
-        pos = label_id_abs % label_div
-        return ref_id, pos, strand
-    ```
-    * Reference ID is extracted from the input BAM file header.
-  
 ### Training usage
-![deeprm_train_pipeline.png](docs/images/deeprm_train_pipeline.png)
-#### Prepare Data
-* You can skip this step if your POD5 files are already basecalled to BAM files with move tags.
-```bash
-dorado basecaller --min-qscore 0 --emit-moves rna004_130bps_sup@v5.0.0 <pod5_dir> > <bam_path>
-samtools index -@ <threads> <bam_path>
-```
-* To preprocess the training data (synthetic oligonucleotide), run the following command:
-```bash
-deeprm train prep --input <input_POD5_dir> --output <output_file>
-```
-* This will create:
-    * Training dataset: /block
-* To compile the training dataset, run the following command:
-```bash
-deeprm train compile --input <input_POD5_dir> --output <output_file>
-```
-* This will create:
-    * Training dataset: /block
-#### Run Training
-* To train the model, run the following command:
-```bash
-deeprm train run --model deeprm_model --data <data_dir> --output <output_dir> --gpu-pool <gpu_pool>
-```
-* Adjust the `--batch` parameter according to your GPU memory capacity (default: 1024).
-* This will create a directory with the trained model file.
+![deeprm_train_pipeline.png](https://raw.githubusercontent.com/vadanamu/DeepRM/public/docs/images/deeprm_train_pipeline.png)
+* Three steps (`prep`, `compile`, `run`), as in the [Quickstart](#model-training). Options:
+  [Usage](https://deeprm.readthedocs.io/en/latest/usage.html).
 
 
 ## 🔧 Troubleshooting
-* If installation fails on old OS (e.g., CentOS 7) due to a NumPy-related error, you can try installing older versions of NumPy first:
-  ```bash
-  python -m pip install "numpy<2.3.0,>2.0.0"
-  python -m pip install -e .
-  ```
-* If you encounter CUDA or torch-related errors, make sure you have installed the correct version of PyTorch with correct CUDA version support.
-* If Dorado fails due to "illegal memory access", try adding `--chunksize <chunk_size>` option (e.g., chunk_size=12000). 
-* If DeepRM call fails due to memory error, try reducing the batch size (`-s` option, default: 10000).
-* If DeepRM train fails due to memory error, try reducing the batch size (`--batch` option, default: 1024).
-* If DeeepRM call preprocess fails due to `libssl.so.1.1` not found error in newer versons of Ubuntu, try  installing `libssl1.1` package:
-  * The libssl file can be found at: https://nz2.archive.ubuntu.com/ubuntu/pool/main/o/openssl
-  ```bash
-  wget <libssl_file>
-  sudo dpkg <libssl_file>
-  ```
-* If DeepRM call preprocess fails due to memory error, try reducing the number of threads (`-t` option), the preprocessing batch size (`-n` option), or the output chunk size (`-k` option).
-* If DeepRM train does not output training-related metrics, try installing `torchmetrics` package:
-  ```bash
-  python -m pip install torchmetrics
-  ```
-
-## 📐 Architecture
-![deeprm_architecture.png](docs/images/deeprm_architecture.png)
-
+* GPU not used, or "no kernel image is available": run `deeprm check` and run the command it prints.
+* "Falling back to Python preprocessing" in the log:
+  [Troubleshooting](https://deeprm.readthedocs.io/en/latest/troubleshooting.html#prep-troubleshooting).
+* Out of GPU memory: lower `-s` for `deeprm call run` (default: 16000) or `--batch` for `deeprm train run` (default: 1024).
+* Other problems: [Troubleshooting](https://deeprm.readthedocs.io/en/latest/troubleshooting.html).
 
 ## 📝 Citation
 If you use DeepRM in your research, please cite the following paper:
-```{code-block} text
-:class: nohighlight
-@article{
-  title={Comprehensive single-molecule resolution discovery of m6A RNA modification sites in the human transcriptome},
-  author={Gihyeon Kang, Hyeonseo Hwang, Hyeonseong Jeon, Heejin Choi, Hee Ryung Chang, Nagyeong Yeo, Junehee Park, Narae Son, Eunkyeong Jeon, Jungmin Lim, Jaeung Yun, Wook Choi, Jae-Yoon Jo, Jong-Seo Kim, Sangho Park, Yoon Ki Kim, Daehyun Baek},
+```text
+@article{kang2026deeprm,
+  title={Comprehensive discovery of m6A sites in the human transcriptome at single-molecule resolution},
+  author={Kang, Gihyeon and Hwang, Hyeonseo and Jeon, Hyeonseong and Choi, Heejin and Chang, Hee Ryung and Yeo, Nagyeong and Park, Junehee and Son, Narae and Jeon, Eunkyeong and Lim, Jungmin and Yun, Jaeung and Choi, Wook and Jo, Jae-Yoon and Kim, Jong-Seo and Park, Sangho and Kim, Yoon Ki and Baek, Daehyun},
   journal={Nature Communications},
-  year={2025},
-  volume={In press},
-  publisher={Springer Nature}
+  volume={17},
+  pages={664},
+  year={2026},
+  publisher={Springer Nature},
   doi={10.1038/s41467-025-67417-w}
+}
 ```
-The article is fully open access and available at https://doi.org/10.1038/s41467-025-67417-w
+The article is fully open access and available at <https://doi.org/10.1038/s41467-025-67417-w>.
 
 ## 📝 License
 <a rel="license" href="http://creativecommons.org/licenses/by-nc-sa/4.0/"><img alt="Creative Commons License" style="border-width:0" src="https://i.creativecommons.org/l/by-nc-sa/4.0/88x31.png" /></a>
 <br />DeepRM is licensed under a <a rel="license" href="http://creativecommons.org/licenses/by-nc-sa/4.0/">Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License</a>
 by Seoul National University R&DB Foundation and Genome4me Inc.
 
-See the [LICENSE](LICENSE.md) file for details.
+See the [LICENSE](https://github.com/vadanamu/DeepRM/blob/public/LICENSE.md) file for details.
 
-## 🏛️ Contributors
+## 🏛 Contributors
 This repository is developed and maintained by the following organization:
 * **Laboratory of Computational Biology, School of Biological Sciences, Seoul National University**
     * Principal Investigator: Prof. Daehyun Baek
 * **Genome4me, Inc., Seoul, Republic of Korea**
 
 
-## 🏛️ Acknowledgements
+## 🏛 Acknowledgements
 This study was supported by the National Research Foundation of Korea (NRF) funded by the Ministry of Science and ICT, Republic of Korea (MSIT) (RS-2019-NR037866, RS-2020-NR049252, RS-2020-NR049538, and RS-2022-NR067483), by a grant of Korean ARPA-H Project through the Korea Health Industry Development Institute (KHIDI), funded by the Ministry of Health & Welfare, Republic of Korea (RS-2025-25422732), by Artificial Intelligence Industrial Convergence Cluster Development Project funded by MSIT and Gwangju Metropolitan City, by National IT Industry Promotion Agency (NIPA) funded by MSIT, and by Korea Research Environment Open Network (KREONET) managed and operated by Korea Institute of Science and Technology Information (KISTI).

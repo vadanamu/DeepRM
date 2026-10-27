@@ -23,9 +23,9 @@ def parser() -> argparse.ArgumentParser:
     sub = gp.add_subparsers(dest="cmd", metavar="{prep,run,pileup}")
     # Skeleton subparsers: no flags yet; no imports
     for name, help_text in [
-        ("prep", "Preprocess raw inputs for inference"),
-        ("run", "Run model inference on preprocessed data"),
-        ("pileup", "Aggregate predictions into site-level metrics"),
+        ("prep", "Preprocess POD5 and BAM files for inference"),
+        ("run", "Run the model on preprocessed data, then the pileup"),
+        ("pileup", "Aggregate per-read predictions into site-level results"),
     ]:
         sub.add_parser(name, help=help_text, add_help=False)
     return gp

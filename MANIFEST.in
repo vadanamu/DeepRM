@@ -3,9 +3,8 @@
 # =========================
 include pyproject.toml
 include README.md
-include LICENSE
+include LICENSE.md
 include CHANGELOG.md
-include CITATION.cff
 include .readthedocs.yml
 
 # =========================

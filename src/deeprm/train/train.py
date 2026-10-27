@@ -8,25 +8,22 @@ It includes the Trainer class, which handles the training loop, evaluation, and 
 import argparse
 import gc
 import glob
-import importlib
 import os
+import sys
 import time
 
 import numpy as np
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 import tqdm
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.tensorboard import SummaryWriter
 
-from deeprm.utils import check_deps
-from deeprm.utils.logging import get_logger
-
-check_deps.check_torch_available()
-
-import torch  # noqa: E402
-import torch.distributed as dist  # noqa: E402
-import torch.multiprocessing as mp  # noqa: E402
-from torch.nn.parallel import DistributedDataParallel as DDP  # noqa: E402
-from torch.utils.tensorboard import SummaryWriter  # noqa: E402
-
-from deeprm.train.train_dataloader import load_dataset  # noqa: E402
+from deeprm.inference.inference import _build_model, _model_name, load_model_file
+from deeprm.model import deeprm_v12
+from deeprm.train.train_dataloader import load_dataset
+from deeprm.utils.logging import get_logger, is_terminal, use_color
 
 log = get_logger(__name__)
 
@@ -38,78 +35,240 @@ except Exception:
     TORCHMETRICS_AVAILABLE = False
 
 
+# The architecture values that deeprm train run does not offer as options. They are written into the model file, as
+# in the bundled v1.2 weights, so that deeprm call run builds the same model (the v1.2 model has no dwell/base-quality
+# input and one output, a logit).
+DEEPRM_V12_FIXED = {
+    "model_type": deeprm_v12.ARCHITECTURE,
+    "no_bq": True,
+    "no_dwell": True,
+    "n_label": 1,
+    "n_class": 1,
+    "output_logits": True,
+    "kmer_mode": "5mer",
+    "t_act": "gelu",  # not used by deeprm_v12 (SwiGLU); deeprm call run reads the key
+}
+
+# Progress-bar colour of each rank (repeated after 8 ranks)
+_BAR_COLOURS = ("red", "green", "blue", "yellow", "magenta", "cyan", "white", "black")
+
+
+def _bar_kwargs(rank: int) -> dict:
+    """The tqdm arguments that place and colour the progress bar of `rank`. Both write terminal control codes, so
+    they are given only on a terminal: position (one line per rank) when standard error is a terminal, colour when
+    it is a terminal and NO_COLOR is unset. In a log file every bar is plain text."""
+    kwargs = {}
+    if is_terminal(sys.stderr):
+        kwargs["position"] = rank
+    if use_color(sys.stderr):
+        kwargs["colour"] = _BAR_COLOURS[rank % len(_BAR_COLOURS)]
+    return kwargs
+
+
 def add_arguments(parser: argparse.ArgumentParser):
     """
     Adds command-line arguments.
+
     Args:
         parser (argparse.ArgumentParser): Argument parser to which arguments will be added.
     Returns:
         None
     """
-    parser.add_argument("--gpu", dest="num_gpu", type=int, default=None, help="Number of GPUs to use")
-    parser.add_argument("--batch", dest="batch_size", type=int, default=1024, help="Batch size for training")
     parser.add_argument(
-        "--eval_batch", dest="eval_batch_size", type=int, default=None, help="Batch size for evaluation"
+        "--gpu",
+        dest="num_gpu",
+        type=int,
+        default=None,
+        help="Number of GPUs to use (default: all GPUs, or as many as --gpu-pool names)",
+    )
+    parser.add_argument("--batch", dest="batch_size", type=int, default=1024, help="Batch size on each GPU")
+    parser.add_argument(
+        "--eval_batch",
+        dest="eval_batch_size",
+        type=int,
+        default=None,
+        help="Has no effect in this version (validation uses --batch)",
     )
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
     parser.add_argument("--epochs", type=int, default=1000, help="Number of epochs to train")
-    parser.add_argument("--data", dest="data_path", type=str, required=True, help="Path to the dataset")
-    parser.add_argument("--output", type=str, required=True, help="Output directory for saving models and logs")
-    parser.add_argument("--tb", dest="tb_path", type=str, default=None, help="TensorBoard log directory")
-    parser.add_argument("--model", dest="model_type", type=str, default="deeprm_model", help="Model type")
-    parser.add_argument("--es-delta", type=float, default=1e-5, help="Early stopping delta")
-    parser.add_argument("--es-patience", type=int, default=50, help="Early stopping patience")
-    parser.add_argument("--es-start", type=int, default=1000, help="Epoch to start early stopping")
-    parser.add_argument("--disk-shard-size", type=int, default=None, help="Disk shard size")
-    parser.add_argument("--seed", type=int, default=None, help="Random seed")
-    parser.add_argument("--enc-dim", type=int, default=512, help="Encoder dimension")
-    parser.add_argument("--lin-dim", type=int, default=1024, help="Linear layer dimension")
-    parser.add_argument("--head", type=int, default=8, help="Number of attention heads")
-    parser.add_argument("--enc-layer", type=int, default=6, help="Number of encoder layers")
-    parser.add_argument("--lin-layer", type=int, default=4, help="Number of linear layers")
-    parser.add_argument("--enc-dropout", type=float, default=0.1, help="Dropout rate for encoder")
-    parser.add_argument("--lin-dropout", type=float, default=0.1, help="Dropout rate for linear layers")
-    parser.add_argument("--period", type=int, default=30, help="Period for logging")
     parser.add_argument(
-        "--buffer_size", dest="shuffle_buffer_size", type=int, default=160000, help="Shuffle buffer size"
+        "--data", dest="data_path", type=str, required=True, help="Folder written by deeprm train compile"
     )
-    parser.add_argument("--kmer-size", type=int, default=5, help="K-mer size")
-    parser.add_argument("--signal-size", type=int, default=30, help="Signal size")
-    parser.add_argument("--block-len", type=int, default=17, help="Block length")
-    parser.add_argument("--seq-len", type=int, default=200, help="Sequence length")
-    parser.add_argument("--t-act", type=str, default="gelu", help="Activation function for transformer")
-    parser.add_argument("--lin-act", type=str, default="gelu", help="Activation function for linear layers")
-    parser.add_argument("--lr-step", type=int, default=4000, help="Learning rate step size")
-    parser.add_argument("--lr-interval", type=int, default=100, help="Learning rate interval")
-    parser.add_argument("--weight-decay", type=float, default=0.1, help="Weight decay for optimizer")
-    parser.add_argument("--class-ratio", type=int, default=None, help="Class ratio for balancing")
-    parser.add_argument("--log-interval", type=int, default=10, help="Interval for logging")
-    parser.add_argument("--eval-interval", type=int, default=1000, help="Interval for evaluation")
-    parser.add_argument("--save-interval", type=int, default=None, help="Interval for saving checkpoints")
-    parser.add_argument("--grad-clip", type=float, default=1.0, help="Gradient clipping value")
-    parser.add_argument("--profiler", type=int, default=0, help="Profiler flag")
-    parser.add_argument("--pin-memory", type=int, default=1, help="Pin memory flag")
-    parser.add_argument("--yield_period", type=int, default=None, help="Yield period for data loading")
-    parser.add_argument("--rlrop", type=float, default=None, help="ReduceLROnPlateau threshold")
-    parser.add_argument("--loss", type=str, default="BCE", help="Loss function")
-    parser.add_argument("--score-feature", type=bool, default=False, help="Score feature flag")
-    parser.add_argument("--gpu-pool", type=int, nargs="+", default=None, help="GPU pool")
-    parser.add_argument("--cut-overlap", type=bool, default=False, help="Cut overlap flag")
-    parser.add_argument("--load-checkpoint", type=str, default=None, help="Path to load checkpoint")
-    parser.add_argument("--workers", dest="num_workers", type=int, default=8, help="Number of workers")
-    parser.add_argument("--prefetch", type=int, default=512, help="Prefetch factor")
-    parser.add_argument("--stride", dest="signal_stride", type=int, default=6, help="Signal stride")
-    parser.add_argument("--no-bq", action="store_true", default=False, help="No base quality flag")
-    parser.add_argument("--load-weight-only", action="store_true", default=False, help="Load weights only flag")
-    parser.add_argument("--override-lr", action="store_true", default=False, help="Override learning rate flag")
-    parser.add_argument("--comment", type=str, default="None", help="Comment for the run")
-    parser.add_argument("--model-name", type=str, default=None, help="Model name")
+    parser.add_argument(
+        "--output",
+        type=str,
+        required=True,
+        help="Output folder; each run writes to a subfolder named after the run (--model-name)",
+    )
+    parser.add_argument(
+        "--tb",
+        dest="tb_path",
+        type=str,
+        default=None,
+        help="Folder for the TensorBoard log; each run writes to a subfolder named after the run (default: "
+        "tensorboard_log in the run folder)",
+    )
+    # Kept, and hidden, so that "--model deeprm_model" is refused: without it argparse would read "--model" as an
+    # abbreviation of "--model-name".
+    parser.add_argument("--model", dest="model_type", type=str, default=deeprm_v12.ARCHITECTURE, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--es-delta", type=float, default=1e-5, help="Smallest drop in validation loss that counts as an improvement"
+    )
+    parser.add_argument(
+        "--es-patience",
+        type=int,
+        default=50,
+        help="Stop when the validation loss has not improved for more than this many epochs (after --es-start)",
+    )
+    parser.add_argument(
+        "--es-start", type=int, default=1000, help="Epoch after which early stopping can stop the training"
+    )
+    parser.add_argument(
+        "--disk-shard-size",
+        type=int,
+        default=None,
+        help="Rows per file of the compiled dataset (default: read from the first file)",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=None, help="Random seed (default: a random seed, written to the log)"
+    )
+    parser.add_argument("--enc-dim", type=int, default=512, help="Width of the transformer layers")
+    parser.add_argument("--lin-dim", type=int, default=1024, help="Feed-forward size of the transformer layers")
+    parser.add_argument("--head", type=int, default=8, help="Number of attention heads")
+    parser.add_argument("--enc-layer", type=int, default=6, help="Number of transformer layers")
+    parser.add_argument(
+        "--lin-layer", type=int, default=6, help="Depth of the output head (the number of its full-width layers)"
+    )
+    parser.add_argument("--enc-dropout", type=float, default=0.1, help="Dropout rate in the transformer layers")
+    parser.add_argument("--lin-dropout", type=float, default=0.1, help="Dropout rate in the output head")
+    parser.add_argument("--period", type=int, default=30, help="Has no effect in this version")
+    parser.add_argument(
+        "--buffer_size", dest="shuffle_buffer_size", type=int, default=160000, help="Rows held in the shuffle buffer"
+    )
+    parser.add_argument("--kmer-size", type=int, default=5, help="Bases per k-mer token")
+    parser.add_argument(
+        "--signal-size", type=int, default=30, help="Signal samples per window; must equal --stride x --kmer-size"
+    )
+    parser.add_argument("--block-len", type=int, default=17, help="Bases per row; the model scores the centre base")
+    parser.add_argument("--seq-len", type=int, default=200, help="Signal windows per row")
+    parser.add_argument(
+        "--lin-act",
+        type=str,
+        default="gelu",
+        choices=list(deeprm_v12.HEAD_ACTIVATIONS),
+        help="Activation function of the output head (the v1.2 weights use gelu)",
+    )
+    parser.add_argument(
+        "--lr-step",
+        type=int,
+        default=4000,
+        help="Length of the cosine learning-rate schedule, in scheduler steps (with --rlrop: its patience)",
+    )
+    parser.add_argument(
+        "--lr-interval", type=int, default=100, help="Training steps between two learning-rate scheduler steps"
+    )
+    parser.add_argument("--weight-decay", type=float, default=0.1, help="Weight decay of the AdamW optimizer")
+    parser.add_argument(
+        "--class-ratio",
+        type=int,
+        default=None,
+        help="Negatives per positive in training (default: the ratio of negative to positive data files)",
+    )
+    parser.add_argument(
+        "--log-interval",
+        type=int,
+        default=10,
+        help="Training steps between two training-loss entries in the TensorBoard log",
+    )
+    parser.add_argument("--eval-interval", type=int, default=1000, help="Training steps between two validation runs")
+    parser.add_argument(
+        "--save-interval",
+        type=int,
+        default=None,
+        help="Training steps between two checks that save the model if the validation loss improved (default: "
+        "--eval-interval)",
+    )
+    parser.add_argument(
+        "--grad-clip",
+        type=float,
+        default=1.0,
+        help="Largest gradient norm; larger gradients are scaled down (0: no clipping)",
+    )
+    parser.add_argument("--profiler", type=int, default=0, help="Has no effect in this version")
+    parser.add_argument("--pin-memory", type=int, default=1, help="Use pinned memory in the data loader (1) or not (0)")
+    parser.add_argument(
+        "--yield_period",
+        type=int,
+        default=None,
+        help="Rows taken from the shuffle buffer at a time; at most --buffer_size (default: --disk-shard-size)",
+    )
+    parser.add_argument(
+        "--rlrop",
+        type=float,
+        default=None,
+        help="Halve the learning rate when the validation loss stops improving by this relative amount, instead of "
+        "the cosine schedule",
+    )
+    parser.add_argument(
+        "--loss",
+        type=str,
+        choices=("BCEWL",),
+        default="BCEWL",
+        help="Loss function: BCEWL (binary cross-entropy on logits), the only choice",
+    )
+    parser.add_argument("--score-feature", type=bool, default=False, help="Has no effect in this version")
+    parser.add_argument(
+        "--gpu-pool", type=int, nargs="+", default=None, help="IDs of the GPUs to use (default: the first --gpu GPUs)"
+    )
+    parser.add_argument("--cut-overlap", type=bool, default=False, help="Has no effect in this version")
+    parser.add_argument(
+        "--load-checkpoint",
+        type=str,
+        default=None,
+        help="Model file or checkpoint to start from; a file without optimizer state (such as the bundled weights) "
+        "loads its weights only",
+    )
+    parser.add_argument(
+        "--workers", dest="num_workers", type=int, default=8, help="Data-loading worker processes per GPU"
+    )
+    parser.add_argument(
+        "--prefetch", type=int, default=512, help="Batches each data-loading worker prepares in advance"
+    )
+    parser.add_argument(
+        "--stride", dest="signal_stride", type=int, default=6, help="Signal samples between the starts of two windows"
+    )
+    parser.add_argument(
+        "--load-weight-only",
+        action="store_true",
+        default=False,
+        help="With --load-checkpoint: load the model weights only, not the optimizer and learning-rate state",
+    )
+    parser.add_argument(
+        "--override-lr",
+        action="store_true",
+        default=False,
+        help="With --load-checkpoint: use --lr instead of the saved learning rate, and do not load the saved "
+        "learning-rate schedule",
+    )
+    parser.add_argument(
+        "--comment",
+        type=str,
+        default="None",
+        help="Text in the default run name, <architecture>-<comment>-<date and time>",
+    )
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        default=None,
+        help="Name of the run: its subfolder of --output and the start of its model file names (default: "
+        "deeprm_v12-<comment>-<date and time>)",
+    )
     return None
 
 
 def main(args: argparse.Namespace):
     """
-    Main function to start the training process.
+    Main function to start the training process (the v1.2 architecture deeprm_v12).
 
     Args:
         args (argparse.Namespace): Parsed command-line arguments.
@@ -117,6 +276,7 @@ def main(args: argparse.Namespace):
     Returns:
         None
     """
+    _deeprm_v12_args(args)
     strfttime = time.strftime("%Y%m%d-%H%M%S")
 
     if args.num_gpu is None:
@@ -125,6 +285,11 @@ def main(args: argparse.Namespace):
         else:
             args.num_gpu = len(args.gpu_pool)
 
+    if args.num_gpu < 1:
+        raise ValueError(
+            "deeprm train needs at least one CUDA GPU (it trains with NCCL), but PyTorch sees none. "
+            "Run `deeprm check` to see why."
+        )
     if args.gpu_pool is None:
         args.gpu_pool = list(range(args.num_gpu))
     else:
@@ -172,6 +337,35 @@ def main(args: argparse.Namespace):
     return None
 
 
+def _deeprm_v12_args(args: argparse.Namespace) -> argparse.Namespace:
+    """Checks the model options and adds DEEPRM_V12_FIXED. Runs before the GPU check, so a refusal needs no GPU."""
+    if args.model_type == "deeprm_model":
+        raise ValueError(
+            "--model deeprm_model: deeprm train run trains only the v1.2 architecture, deeprm_v12. To train the v1.1 "
+            "model, use DeepRM v1.1 (pip install deeprm==1.1.3); for deeprm_v12, leave --model out."
+        )
+    if args.model_type != deeprm_v12.ARCHITECTURE:
+        raise ValueError(
+            f"--model {args.model_type}: deeprm train run trains only the v1.2 architecture, deeprm_v12. "
+            "Leave --model out."
+        )
+    if args.signal_size != args.signal_stride * args.kmer_size:
+        raise ValueError(
+            f"--signal-size {args.signal_size} must equal --stride x --kmer-size "
+            f"({args.signal_stride} x {args.kmer_size} = {args.signal_stride * args.kmer_size})."
+        )
+    if args.load_checkpoint is not None:
+        save_dict = load_model_file(args.load_checkpoint)
+        # a v1.1 file is refused
+        _model_name(save_dict.get("model_config", {}), None, save_dict.get("model_state_dict"), "--load-checkpoint")
+        if "optimizer_state_dict" not in save_dict and not args.load_weight_only:
+            log.info("%s holds no optimizer state (a weight file): loading its weights only.", args.load_checkpoint)
+            args.load_weight_only = True
+        del save_dict
+    vars(args).update(DEEPRM_V12_FIXED)
+    return args
+
+
 class Trainer:
     def __init__(
         self,
@@ -201,7 +395,6 @@ class Trainer:
         score_feature: bool = False,
         cut_overlap: bool = False,
         signal_stride: int = 6,
-        no_bq: bool = False,
         **kwargs,
     ) -> None:
         """
@@ -236,7 +429,6 @@ class Trainer:
             score_feature (bool): Score feature flag. Defaults to False. (optional)
             cut_overlap (bool): Cut overlap flag. Defaults to False. (optional)
             signal_stride (int): Signal stride. Defaults to 6. (optional)
-            no_bq (bool): No base quality flag. Defaults to False. (optional)
             **kwargs: Additional keyword arguments.
         """
         self.rank = rank
@@ -280,7 +472,6 @@ class Trainer:
         self.cut_overlap = cut_overlap
         self.signal_stride = signal_stride
         self.histogram = False
-        self.no_bq = no_bq
         if self.rank == 0 and self.tb_path is not None:
             self.tb_writer = SummaryWriter(tb_path)
         else:
@@ -319,12 +510,8 @@ class Trainer:
         src_signal = source["signal_token"].to(self.gpu_id)
         src_seg_len = source["segment_len"].to(self.gpu_id)
 
-        if self.no_bq:
-            output = self.model(src_kmer, src_signal, src_seg_len)
-        else:
-            src_dwell_bq = source["dwell_bq_token"].to(self.gpu_id)
-            output = self.model(src_kmer, src_signal, src_seg_len, src_dwell_bq)
-
+        # deeprm_v12 takes no dwell/base-quality input and returns (rows, 1) logits; the target is (rows,)
+        output = self.model(src_kmer, src_signal, src_seg_len).squeeze(-1)
         return output, target
 
     def _run_batch(self, source, target):
@@ -370,17 +557,14 @@ class Trainer:
         self.current_batch = 0
         self.model.train()
         self.current_lr = self.optimizer.param_groups[0]["lr"]
-        colour_choice = ["red", "green", "blue", "yellow", "magenta", "cyan", "white", "black"]
         dist.barrier()
         time.sleep(0.03 * self.gpu_id)
         with tqdm.tqdm(
             total=len(self.train_loader),
             desc=f"[GPU {self.gpu_id}] Epoch {self.current_epoch}",
-            position=self.rank,
-            colour=colour_choice[self.rank % len(colour_choice)],
             smoothing=0,
+            **_bar_kwargs(self.rank),
         ) as self.pbar:
-
             for source, targets in self.train_loader:
                 self._run_batch(source, targets)
                 self.current_interval_losses.append(self.current_batch_loss)
@@ -452,7 +636,8 @@ class Trainer:
         metric_dict = {}
 
         for metric_name, metric_func in self.metric_func_dict.items():
-            metric_dict[metric_name] = metric_func(outputs, targets)
+            # the model returns logits; torchmetrics would read logits that all lie in [0, 1] as probabilities
+            metric_dict[metric_name] = metric_func(torch.sigmoid(outputs), targets)
 
         dist.barrier()
         val_loss = torch.tensor(val_loss).to(self.gpu_id)
@@ -609,15 +794,7 @@ def main_worker(rank, args_dict):
     """
     gpu_id = args_dict["gpu_pool"][rank]
     setup_ddp(rank, args_dict["num_gpu"], gpu_id)
-    TransformerModel = importlib.import_module(f"deeprm.model.{args_dict['model_type']}").TransformerModel
-    model = TransformerModel(
-        d_model=args_dict["enc_dim"],
-        n_heads=args_dict["head"],
-        d_ff=args_dict["lin_dim"],
-        n_layers=args_dict["enc_layer"],
-        lin_depth=args_dict["lin_layer"],
-        **args_dict,
-    )
+    model = _build_model(deeprm_v12.TransformerModel, args_dict)  # the same builder as deeprm call run
     if rank == 0:
         total_params = 0
         for name, parameter in model.named_parameters():
@@ -628,9 +805,8 @@ def main_worker(rank, args_dict):
     model = model.to(gpu_id)
 
     if args_dict["load_checkpoint"] is not None:
-        save_dict = torch.load(
-            args_dict["load_checkpoint"], map_location={"cuda:0": f"cuda:{gpu_id}"}, weights_only=False
-        )
+        # every tensor loads onto this process's GPU, whatever GPU the file was saved from
+        save_dict = load_model_file(args_dict["load_checkpoint"], map_location=f"cuda:{gpu_id}")
         model.load_state_dict(state_dict=save_dict["model_state_dict"])
         if args_dict["load_weight_only"]:
             for param in model.parameters():
@@ -673,16 +849,7 @@ def main_worker(rank, args_dict):
         del save_dict
         gc.collect()
 
-    if args_dict["loss"] == "MSE":
-        loss_func = torch.nn.MSELoss()
-    elif args_dict["loss"] == "BCE":
-        loss_func = torch.nn.BCELoss()
-    elif args_dict["loss"] == "BCEWL":
-        loss_func = torch.nn.BCEWithLogitsLoss()
-    elif args_dict["loss"] == "CE":
-        loss_func = torch.nn.CrossEntropyLoss()
-    else:
-        raise ValueError(f"Loss Function {args_dict['loss']} Not Implemented.")
+    loss_func = torch.nn.BCEWithLogitsLoss()  # the model returns logits (output_logits=True)
 
     if TORCHMETRICS_AVAILABLE:
         metric_func_dict = {

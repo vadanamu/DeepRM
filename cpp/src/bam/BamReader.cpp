@@ -1,6 +1,6 @@
 /***************************************************************************************************
  *
- * Copyright (C) 2025 Genome4me Incorporated - All Rights Reserved.
+ * Copyright (C) 2025-2026 Genome4me Incorporated - All Rights Reserved.
  *
  * This software, including its source code, embedded concepts, and associated
  * documentation, is proprietary to Genome4me Incorporated and is protected
@@ -13,19 +13,19 @@
  *
  **************************************************************************************************/
 
-#include "BamReader.h"
-#include "../utils/Utils.h"
+#include "bam/BamReader.h"
+
 #include <iostream>
-#include <cmath>
-#include <cstring>
-#include <cctype>
 #include <utility>
 
+#include <htslib/bgzf.h>
+
+#include "bam/BamRecordExtractor.h"
+#include "utils/Utils.h"
+
 namespace deeprm {
-  BamReader::BamReader(const string& path, int bq_threshold, char boi,
-                       unordered_map<string, int>& ref_index_dict)
-    : bam_path(path), bq_cutoff(bq_threshold), base_of_interest(boi),
-      ref_index_dict(ref_index_dict)
+  BamReader::BamReader(const string& path, int filter_flag)
+    : bam_path(path), filter_flag(filter_flag), ranged(false), v_lo(0), v_hi(0)
   {
   }
 
@@ -33,443 +33,114 @@ namespace deeprm {
   {
   }
 
-  uint32_t BamReader::get_md_reference_length(const char* md_tag)
+  vector<pair<Uuid128, uint64_t>> BamReader::harvest_offsets(int process_id,
+                                                            int num_processes,
+                                                            int num_threads)
   {
-    uint32_t length = 0;
-    int idx = 0;
-
-    while (md_tag[idx] != '\0') {
-      if (md_tag[idx] >= '0' && md_tag[idx] <= '9') {
-        // Number of matches
-        int num = 0;
-        while (md_tag[idx] >= '0' && md_tag[idx] <= '9') {
-          num = num * 10 + (md_tag[idx] - '0');
-          idx++;
-        }
-        length += num;
-      } else if (md_tag[idx] == '^') {
-        // Deletion
-        idx++;
-        while (md_tag[idx] >= 'A' && md_tag[idx] <= 'Z') {
-          length++;
-          idx++;
-        }
-      } else {
-        // Mismatch
-        length++;
-        idx++;
-      }
-    }
-
-    return length;
-  }
-
-  string BamReader::build_alignment_sequence(bam1_t* read)
-  {
-    if (!read) return "";
-
-    uint8_t* md_tag_ptr = bam_aux_get(read, "MD");
-    if (!md_tag_ptr) return "";
-
-    // Get query start and end considering soft clipping
-    uint32_t start = 0;
-    uint32_t end = read->core.l_qseq;
-    uint32_t* cigar = bam_get_cigar(read);
-
-    // Check for soft clipping at the beginning
-    if (read->core.n_cigar > 0) {
-      int op = bam_cigar_op(cigar[0]);
-      if (op == BAM_CSOFT_CLIP) {
-        start = bam_cigar_oplen(cigar[0]);
-      }
-      // Check for soft clipping at the end
-      if (read->core.n_cigar > 1) {
-        op = bam_cigar_op(cigar[read->core.n_cigar - 1]);
-        if (op == BAM_CSOFT_CLIP) {
-          end -= bam_cigar_oplen(cigar[read->core.n_cigar - 1]);
-        }
-      }
-    }
-
-    // Get read sequence
-    uint8_t* seq = bam_get_seq(read);
-    string read_sequence;
-    for (uint32_t i = start; i < end; ++i) {
-      read_sequence += seq_nt16_str[bam_seqi(seq, i)];
-    }
-
-    uint32_t r_idx = 0;
-    int s_idx = 0;
-    uint32_t max_len = 0;
-
-    // Calculate alignment length
-    for (uint32_t k = 0; k < read->core.n_cigar; ++k) {
-      int op = bam_cigar_op(cigar[k]);
-      int len = bam_cigar_oplen(cigar[k]);
-
-      switch (op) {
-        case BAM_CMATCH:
-        case BAM_CEQUAL:
-        case BAM_CDIFF:
-        case BAM_CDEL:
-        case BAM_CINS:
-        case BAM_CPAD:
-          max_len += len;
-          break;
-      }
-    }
-
-    if (max_len == 0) return "";
-
-    string s(max_len + 1, '\0');
-
-    // Build alignment sequence from CIGAR
-    for (uint32_t k = 0; k < read->core.n_cigar; ++k) {
-      int op = bam_cigar_op(cigar[k]);
-      int len = bam_cigar_oplen(cigar[k]);
-
-      switch (op) {
-        case BAM_CMATCH:
-        case BAM_CEQUAL:
-        case BAM_CDIFF:
-          for (int i = 0; i < len; ++i) {
-            s[s_idx] = read_sequence[r_idx];
-            r_idx++;
-            s_idx++;
-          }
-          break;
-        case BAM_CDEL:
-          for (int i = 0; i < len; ++i) {
-            s[s_idx] = '-';
-            s_idx++;
-          }
-          break;
-        case BAM_CREF_SKIP:
-          break;
-        case BAM_CINS:
-        case BAM_CPAD:
-          for (int i = 0; i < len; ++i) {
-            // Encode insertions as lowercase
-            s[s_idx] = tolower(read_sequence[r_idx]);
-            r_idx++;
-            s_idx++;
-          }
-          break;
-        case BAM_CSOFT_CLIP:
-        case BAM_CHARD_CLIP:
-          break;
-      }
-    }
-
-    // Get MD tag
-    char* md_tag;
-    uint8_t md_typecode = md_tag_ptr[0];
-    if (md_typecode == 'Z') {
-      md_tag = bam_aux2Z(md_tag_ptr);
-    } else if (md_typecode == 'A') {
-      // Work around HTSeq bug
-      static char md_buffer[2];
-      md_buffer[0] = bam_aux2A(md_tag_ptr);
-      md_buffer[1] = '\0';
-      md_tag = md_buffer;
-    } else {
-      return "";
-    }
-
-    // Apply MD tag
-    int md_idx = 0;
-    s_idx = 0;
-    int nmatches = 0;
-
-    // Count insertions
-    int insertions = 0;
-    for (int i = 0; cmp_less(i, max_len); ++i) {
-      if (s[i] >= 'a' && s[i] <= 'z') {
-        insertions++;
-      }
-    }
-
-    // Validate MD tag length
-    uint32_t md_len = get_md_reference_length(md_tag);
-    if (md_len + insertions > max_len) {
-      return "";
-    }
-
-    s_idx = 0;
-    r_idx = 0;
-
-    while (md_tag[md_idx] != '\0') {
-      if (md_tag[md_idx] >= '0' && md_tag[md_idx] <= '9') {
-        // Number of matches
-        nmatches = nmatches * 10 + (md_tag[md_idx] - '0');
-        md_idx++;
-        continue;
-      } else {
-        // Process matches, skipping insertions
-        for (int x = 0; x < nmatches; ++x) {
-          while (cmp_less(s_idx, max_len) && s[s_idx] >= 'a' && s[s_idx] <= 'z') {
-            s_idx++;
-          }
-          s_idx++;
-        }
-        while (cmp_less(s_idx, max_len) && s[s_idx] >= 'a' && s[s_idx] <= 'z') {
-          s_idx++;
-        }
-
-        r_idx += nmatches;
-        nmatches = 0;
-
-        if (md_tag[md_idx] == '^') {
-          // Deletion
-          md_idx++;
-          while (md_tag[md_idx] >= 'A' && md_tag[md_idx] <= 'Z') {
-            if (cmp_less(s_idx, max_len)) {
-              s[s_idx] = md_tag[md_idx];
-            }
-            s_idx++;
-            md_idx++;
-          }
-        } else {
-          // Mismatch - enforce lowercase
-          char c = md_tag[md_idx];
-          if (c <= 'Z') {
-            c += 32;
-          }
-          if (cmp_less(s_idx, max_len)) {
-            s[s_idx] = c;
-          }
-          s_idx++;
-          r_idx++;
-          md_idx++;
-        }
-      }
-    }
-
-    // Process remaining matches
-    for (int x = 0; x < nmatches; ++x) {
-      while (cmp_less(s_idx, max_len) && s[s_idx] >= 'a' && s[s_idx] <= 'z') {
-        s_idx++;
-      }
-      s_idx++;
-    }
-    while (cmp_less(s_idx, max_len) && s[s_idx] >= 'a' && s[s_idx] <= 'z') {
-      s_idx++;
-    }
-
-    return s.substr(0, s_idx);
-  }
-
-  string BamReader::build_reference_sequence(bam1_t* read)
-  {
-    string ref_seq = build_alignment_sequence(read);
-    if (ref_seq.empty()) return "";
-
-    string s;
-    uint32_t* cigar = bam_get_cigar(read);
-    uint32_t r_idx = 0;
-
-    for (uint32_t k = 0; k < read->core.n_cigar; ++k) {
-      int op = bam_cigar_op(cigar[k]);
-      int len = bam_cigar_oplen(cigar[k]);
-
-      switch (op) {
-        case BAM_CMATCH:
-        case BAM_CEQUAL:
-        case BAM_CDIFF:
-          for (int i = 0; i < len; ++i) {
-            if (r_idx < ref_seq.length()) {
-              s += ref_seq[r_idx];
-              r_idx++;
-            }
-          }
-          break;
-        case BAM_CDEL:
-          for (int i = 0; i < len; ++i) {
-            if (r_idx < ref_seq.length()) {
-              s += ref_seq[r_idx];
-              r_idx++;
-            }
-          }
-          break;
-        case BAM_CREF_SKIP:
-          break;
-        case BAM_CINS:
-        case BAM_CPAD:
-          r_idx += len;
-          break;
-        case BAM_CSOFT_CLIP:
-        case BAM_CHARD_CLIP:
-          break;
-      }
-    }
-
-    return s;
-  }
-
-  vector<pair<int32_t, int32_t>> BamReader::get_aligned_pairs(bam1_t* read, char boi)
-  {
-    vector<pair<int32_t, int32_t>> pairs;
-
-    // Get MD tag to reconstruct reference sequence
-    uint8_t* md_tag = bam_aux_get(read, "MD");
-    if (!md_tag) {
-      return pairs;
-    }
-
-    // Build reference sequence using pysam logic
-    string ref_seq = build_reference_sequence(read);
-    if (ref_seq.empty()) {
-      return pairs;
-    }
-
-    uint32_t* cigar = bam_get_cigar(read);
-    int32_t ref_pos = read->core.pos;
-    int32_t query_pos = 0;
-    int32_t ref_seq_idx = 0;
-
-    for (uint32_t i = 0; i < read->core.n_cigar; ++i) {
-      int op = bam_cigar_op(cigar[i]);
-      int len = bam_cigar_oplen(cigar[i]);
-
-      switch (op) {
-        case BAM_CMATCH:
-        case BAM_CEQUAL:
-        case BAM_CDIFF:
-          for (int j = 0; j < len; ++j) {
-            // Check reference base
-            if (cmp_less(ref_seq_idx, ref_seq.length()) && ref_seq[ref_seq_idx] ==
-              boi) {
-              pairs.emplace_back(query_pos, ref_pos + j);
-            }
-            query_pos++;
-            ref_seq_idx++;
-          }
-          ref_pos += len;
-          break;
-        case BAM_CINS:
-        case BAM_CSOFT_CLIP:
-        case BAM_CPAD:
-          query_pos += len;
-          break;
-        case BAM_CDEL:
-          ref_seq_idx += len;
-          ref_pos += len;
-          break;
-        case BAM_CREF_SKIP:
-          ref_pos += len;
-          break;
-        case BAM_CHARD_CLIP:
-        case BAM_CBACK:
-        default:
-          break;
-      }
-    }
-
-    return pairs;
-  }
-
-  void BamReader::process_read(bam1_t* read, vector<BamRecord>& records)
-  {
-    if (read->core.flag & BAM_FUNMAP) return;
-    if (read->core.l_qseq == 0) return;
-
-    // Check for mv tag
-    uint8_t* mv_tag = bam_aux_get(read, "mv");
-    if (!mv_tag) return;
-
-    // Get base qualities
-    vector<uint8_t> bq;
-    uint8_t* qual = bam_get_qual(read);
-    for (int i = 0; i < read->core.l_qseq; ++i) {
-      bq.push_back(qual[i]);
-    }
-
-    // Check quality threshold
-    if (Utils::mean_phred(bq) < bq_cutoff) return;
-
-    // Get aligned pairs for base of interest
-    auto ap = get_aligned_pairs(read, base_of_interest);
-    if (ap.empty()) return;
-
-    BamRecord record;
-
-    // Get read ID and parent ID
-    record.read_id = string(bam_get_qname(read));
-    uint8_t* pi_tag = bam_aux_get(read, "pi");
-    record.parent_id = pi_tag ? string(bam_aux2Z(pi_tag)) : record.read_id;
-
-    // Get tags
-    uint8_t* ts_tag = bam_aux_get(read, "ts");
-    record.ts = ts_tag ? bam_aux2i(ts_tag) : 0;
-
-    uint8_t* ns_tag = bam_aux_get(read, "ns");
-    record.ns = ns_tag ? bam_aux2i(ns_tag) : 0;
-
-    uint8_t* sp_tag = bam_aux_get(read, "sp");
-    record.sp = sp_tag ? bam_aux2i(sp_tag) : 0;
-
-    // Get move array
-    int mv_len = bam_auxB_len(mv_tag);
-    for (int i = 1; i < mv_len; ++i) {
-      int64_t mv_val = bam_auxB2i(mv_tag, i);
-      record.mv.push_back(mv_val != 0);
-    }
-
-    // Get sequence
-    uint8_t* seq = bam_get_seq(read);
-    for (int i = 0; i < read->core.l_qseq; ++i) {
-      record.seq.push_back(seq_nt16_str[bam_seqi(seq, i)]);
-    }
-
-    record.bq = bq;
-
-    // Get reference id
-    record.ref = read->core.tid;
-
-    record.ap = ap;
-
-    // Get strand information
-    record.strand = (read->core.flag & BAM_FREVERSE) ? -1 : 1;
-
-    records.push_back(record);
-  }
-
-  vector<BamRecord> BamReader::parse_bam(int process_id, int num_processes, int num_threads)
-  {
-    vector<BamRecord> records;
+    vector<pair<Uuid128, uint64_t>> out;
 
     samFile* bam_file = sam_open(bam_path.c_str(), "r");
     if (!bam_file) {
       cerr << "Failed to open BAM file: " << bam_path << endl;
-      return records;
+      read_failed = true;
+      return out;
     }
-
-    // Set threads
-    if (num_threads > 1) {
+    // File mode seeks by BGZF virtual offset, so it needs a BGZF-compressed BAM; a SAM or CRAM file
+    // would crash it.
+    const htsFormat* format = hts_get_format(bam_file);
+    if (format->format != htsExactFormat::bam || format->compression != htsCompression::bgzf) {
+      if (process_id == 0)
+        cerr << "Not a BAM file: " << bam_path << " (file mode needs a BGZF-compressed BAM; convert it with "
+             << "samtools view -b, or stream it with -b -)" << endl;
+      read_failed = true;
+      sam_close(bam_file);
+      return out;
+    }
+    if (num_threads > 1)
       hts_set_threads(bam_file, num_threads);
-    }
 
     sam_hdr_t* header = sam_hdr_read(bam_file);
     if (!header) {
       cerr << "Failed to read BAM header" << endl;
+      read_failed = true;
       sam_close(bam_file);
-      return records;
+      return out;
+    }
+    // Reading the header checks the end of a seekable BAM for the BGZF end-of-file block. Without
+    // it the file was cut off (a writer that stopped between two blocks leaves it so) and its last
+    // records are missing, although every block that is there reads cleanly.
+    if (bam_file->fp.bgzf->no_eof_block) {
+      if (process_id == 0)
+        cerr << "The BAM file has no BGZF end-of-file block, so it is cut off (or still being written): "
+             << bam_path << endl;
+      read_failed = true;
+      sam_hdr_destroy(header);
+      sam_close(bam_file);
+      return out;
     }
 
     bam1_t* read = bam_init1();
-    int read_idx = 0;
+    BGZF* bgzf = bam_file->fp.bgzf;
 
-    while (sam_read1(bam_file, header, read) >= 0) {
-      if (read_idx % num_processes == process_id) {
-        process_read(read, records);
+    // The voffset must be captured BEFORE sam_read1 consumes the record --
+    // afterwards bgzf_tell points at the NEXT record. Only the checks that
+    // read bam1_core_t directly are applied here (empty SEQ, -g flag mask);
+    // qcut / mv / MD checks need the decoded record and stay in
+    // extract_record, which phase 2 runs on the
+    // re-read copy, so the final record set is decided by exactly the same
+    // predicate as before. Streaming's dispatcher pre-filter tests the same
+    // pair, so both modes discard a record at the earliest point it can be
+    // recognised.
+    auto harvest_one = [&](uint64_t voffset) {
+      if (!BamRecordExtractor::passes_prefilter(read, filter_flag))
+        return;
+      out.emplace_back(uuid128_from_str(BamRecordExtractor::parent_id(read)), voffset);
+    };
+
+    if (ranged) {
+      // Fast path: seek to this reader's range and consume records until
+      // the first whose START voffset is >= v_hi. The bound is tested BEFORE
+      // reading, so a record straddling the boundary belongs to exactly one
+      // range -- the union then covers every record once.
+      if (bgzf_seek(bgzf, static_cast<int64_t>(v_lo), SEEK_SET) < 0) {
+        cerr << "Failed to seek BAM to voffset " << v_lo << endl;
+        read_failed = true;
+      } else {
+        while (true) {
+          uint64_t v = static_cast<uint64_t>(bgzf_tell(bgzf));
+          if (v_hi != 0 && v >= v_hi)
+            break;
+          int r = sam_read1(bam_file, header, read);
+          if (r < -1) {
+            cerr << "Failed to read a BAM record (error " << r << ")" << endl;
+            read_failed = true;
+          }
+          if (r < 0)
+            break;
+          harvest_one(v);
+        }
       }
-      read_idx++;
+    } else {
+      int read_idx = 0;
+      while (true) {
+        uint64_t v = static_cast<uint64_t>(bgzf_tell(bgzf));
+        int r = sam_read1(bam_file, header, read);
+        if (r < -1) {
+          cerr << "Failed to read a BAM record (error " << r << ")" << endl;
+          read_failed = true;
+        }
+        if (r < 0)
+          break;
+        if (read_idx % num_processes == process_id)
+          harvest_one(v);
+        read_idx++;
+      }
     }
 
     bam_destroy1(read);
     sam_hdr_destroy(header);
     sam_close(bam_file);
 
-    return records;
+    return out;
   }
 } // namespace deeprm

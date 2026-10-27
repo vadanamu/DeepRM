@@ -1,6 +1,7 @@
 # `deeprm qc`
 
-Quality-control utilities for predictions and site-level outputs.
+Quality-control plots for basecalled reads (`deeprm qc run`), alignments (`deeprm qc alignment`) and training data
+(`deeprm qc block`).
 
 ## Group help
 
@@ -10,15 +11,50 @@ Quality-control utilities for predictions and site-level outputs.
 :prog: deeprm qc
 ```
 
+## `deeprm qc run`
+
+```{eval-rst}
+.. argparse::
+   :module: deeprm.qc.inspect_run
+   :func: add_arguments
+   :passparser:
+   :prog: deeprm qc run
+
+   --process -p : @replace
+      Number of worker processes (default: about a quarter of the CPUs)
+```
+
+## `deeprm qc alignment`
+
+```{eval-rst}
+.. argparse::
+   :module: deeprm.qc.inspect_alignment
+   :func: add_arguments
+   :passparser:
+   :prog: deeprm qc alignment
+
+   --process -p : @replace
+      Number of worker processes (default: about a quarter of the CPUs)
+```
+
+## `deeprm qc block`
+
+```{argparse}
+:module: deeprm.qc.inspect_block
+:func: add_arguments
+:passparser:
+:prog: deeprm qc block
+```
+
 ## Examples
 
 ```bash
-# Inspect run
-deeprm qc run -i <prediction_dir> -o <output_dir>
+# Inspect a basecalled run
+deeprm qc run -i <bam_file> -o <output_dir>
 
-# Inspect training data
-deeprm qc block -i <block_file> -o <output_dir> -t m6A
+# Inspect training data: the data folders that deeprm train prep writes
+deeprm qc block -i <prep_dir>/a/data <prep_dir>/m6a/data -t A m6A -o <qc_dir>
 
-# Inspect alignment
+# Inspect an alignment
 deeprm qc alignment -i <bam_file> -o <output_dir>
 ```

@@ -18,8 +18,8 @@ def parser() -> argparse.ArgumentParser:
     sub = gp.add_subparsers(dest="cmd", metavar="{prep,run,compile}")
     for name, help_text in [
         ("prep", "Prepare training data"),
-        ("compile", "Compile training dataset"),
-        ("run", "Launch training"),
+        ("compile", "Compile the training dataset"),
+        ("run", "Train a model on one or more GPUs"),
     ]:
         sub.add_parser(name, help=help_text, add_help=False)
     return gp

@@ -6,25 +6,26 @@ This module provides:
 * `TranscriptMapper`: A vectorized mapper that converts 0-based, half-open
   transcript coordinates into genomic coordinates for both '+' and '-' strands,
   returning `np.nan` for out-of-bounds inputs.
-* `worker`: A multiprocessing worker that applies the mapper per transcript and
-  aggregates metrics.
 * `parse_refflat`: A helper to parse RefFlat/RefGene/GenePred annotations into a
   normalized DataFrame.
-* `load_split_data`: A helper that splits grouped input data into balanced shards
-  for parallel processing.
-* `pileup_genomic`: A high-level function that produces a per-(chrom, strand, pos)
-  pileup with derived scores.
+* `pileup_genomic`: A high-level function that adds up per-site sums per
+  (chrom, strand, pos). It maps all sites of all transcripts in one vectorized pass
+  (the same mapping as `TranscriptMapper`). The scores are computed from these sums
+  by `deeprm.inference.pileup_deeprm`, the same way as for the transcript table.
 
 All exon intervals are assumed to be 0-based, half-open `[start, end)`, sorted by
 genomic start in ascending order.
 """
 
-import gc
-import multiprocessing as mp
+import logging
+import re
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
+
+from deeprm.utils.logging import get_logger
+
+log = get_logger(__name__)
 
 
 class TranscriptMapper:
@@ -126,122 +127,6 @@ class TranscriptMapper:
         return out
 
 
-def worker(df_list, refflat_df, collect_list):
-    """Multiprocessing worker that maps transcript to genomic positions and aggregates metrics.
-
-    Iterates over per-transcript DataFrames, maps the `ref_pos` transcript offsets to
-    genomic positions using `TranscriptMapper`, drops rows with NaN genomic positions,
-    and aggregates metrics per (chrom, strand, pos). Results are appended to a shared
-    `multiprocessing.Manager().list()` for collection by the parent process.
-
-    Args:
-        df_list (list): List of DataFrames, each corresponding to a single
-            transcript. Each DataFrame is expected to contain:
-            - `transcript_id` (str): All rows share the same ID.
-            - `ref_pos` (int): Transcript-relative offsets (0-based).
-            - Metric columns used for aggregation:
-            `kl_div_neg`, `kl_div_pos`, `count_all`, `count_pos`, `logsum_1_p_pos`.
-        refflat_df (pandas.DataFrame): Annotation DataFrame indexed by `transcript_id`.
-            Must provide columns: `exonStarts` (numpy.ndarray), `exonEnds` (numpy.ndarray),
-            `strand` ('+'|'-'), and `chrom` (str).
-        collect_list (list): Shared list where the worker
-            appends its aggregated result DataFrame.
-
-    Returns:
-        None: Results are appended to `collect_list` as a `pandas.DataFrame` with columns:
-            `chrom`, `strand`, `pos`, `kl_div_neg`, `kl_div_pos`, `count_all`,
-            `count_pos`, `logsum_1_p_pos`.
-
-    Notes:
-        * Transcripts missing in `refflat_df` or with invalid mapping are skipped.
-        * Any unexpected exception within a transcript block is caught and skipped,
-          allowing the worker to continue processing subsequent transcripts.
-        * A tqdm progress bar is displayed with `leave=False`.
-    """
-    local_collect = []
-    for transcript_df in tqdm(df_list, desc="Converting to genomic coordinates", leave=False):
-        if len(transcript_df) == 0:
-            continue
-
-        transcript_id = transcript_df["transcript_id"].iloc[0]
-        try:
-            refflat_row = refflat_df.loc[transcript_id]
-        except KeyError:
-            continue
-
-        exon_starts = np.asarray(refflat_row["exonStarts"], dtype=np.int64)
-        exon_ends = np.asarray(refflat_row["exonEnds"], dtype=np.int64)
-        strand = refflat_row["strand"]
-        chrom = refflat_row["chrom"]
-
-        mapper = TranscriptMapper(exon_starts=exon_starts, exon_ends=exon_ends, strand=strand)
-        mapped_df = transcript_df.copy()
-        mapped_df["chrom"] = chrom
-        mapped_df["strand"] = strand
-        mapped_df["pos"] = mapper.map(mapped_df["ref_pos"].to_numpy())
-        mapped_df = mapped_df.dropna(subset=["pos"])
-        if len(mapped_df) == 0:
-            continue
-        mapped_df["pos"] = mapped_df["pos"].astype(np.int64)
-        local_collect.append(mapped_df)
-
-    if local_collect:
-        df = pd.concat(local_collect, ignore_index=True)
-        df = df.groupby(["chrom", "strand", "pos"], as_index=False).agg(
-            {
-                "kl_div_neg": "sum",
-                "kl_div_pos": "sum",
-                "count_all": "sum",
-                "count_pos": "sum",
-                "logsum_1_p_pos": "sum",
-            }
-        )
-        collect_list.append(df)
-    return None
-
-
-def load_split_data(data_df, cpu):
-    """Group by transcript and split into balanced shards for parallel processing.
-
-    The input is grouped by `transcript_id` (renamed from `ref_names`), sorted by
-    descending group size, then distributed across up to `cpu` shards using a
-    zig-zag assignment (`0..cpu-1..0`) to balance large and small groups.
-
-    Args:
-        data_df (pandas.DataFrame): Input DataFrame containing at least:
-            - `ref_names` (str): Transcript identifier per row; will be renamed to
-            `transcript_id`.
-            - Other columns required downstream (e.g., `ref_pos`, metrics).
-        cpu (int): Maximum number of shards (typically the number of worker processes).
-
-    Returns:
-        list: A list of length `min(cpu, n_groups)` where each element
-        is a list of per-transcript DataFrames to be handled by one worker.
-
-    Notes:
-        * Groups are sorted by size to improve load balancing.
-        * The zig-zag distribution helps avoid piling all large groups onto early shards.
-    """
-
-    if cpu <= 0:
-        raise ValueError("cpu must be positive")
-
-    data_df = data_df.rename({"ref_names": "transcript_id"}, axis=1)
-    grouped = sorted(data_df.groupby("transcript_id"), key=lambda x: len(x[1]), reverse=True)
-    if len(grouped) == 0:
-        return []
-
-    n_shards = min(cpu, len(grouped))
-    df_list_split = [[] for _ in range(n_shards)]
-    cycle = max(1, n_shards)
-    for idx, (_, df) in enumerate(grouped):
-        split_idx = idx % (2 * cycle)
-        if split_idx >= cycle:
-            split_idx = 2 * cycle - split_idx - 1
-        df_list_split[split_idx].append(df)
-    return df_list_split
-
-
 def _parse_exon_array(value):
     if isinstance(value, np.ndarray):
         return value.astype(np.int64, copy=False)
@@ -251,6 +136,76 @@ def _parse_exon_array(value):
     if text == "":
         return np.array([], dtype=np.int64)
     return np.fromstring(text, sep=",", dtype=np.int64)
+
+
+# A plain exon list: non-negative integers separated by commas, with at most one trailing comma (UCSC style)
+_EXON_LIST = re.compile(r"\d+(,\d+)*,?")
+
+
+def _parse_exon_lists(column):
+    """Parses a whole exon-list column at once.
+
+    Returns:
+        tuple: (all values of all rows as one int64 array, number of values per row), or None when a row is not a
+        plain exon list; parse_refflat then parses and checks the rows one by one.
+    """
+    text = column.astype(str).str.strip()
+    if not text.map(lambda t: t == "" or _EXON_LIST.fullmatch(t) is not None).all():
+        return None
+    text = text.str.removesuffix(",")
+    counts = np.where(text.str.len().to_numpy() == 0, 0, text.str.count(",").to_numpy() + 1).astype(np.int64)
+    joined = ",".join(t for t in text.tolist() if t)
+    values = np.fromstring(joined, sep=",", dtype=np.int64) if joined else np.empty(0, dtype=np.int64)
+    if len(values) != counts.sum():
+        return None
+    return values, counts
+
+
+def _keep_valid_exons(refflat_df, starts, ends):
+    """The rows of `refflat_df` whose exon lists pass the checks of parse_refflat, with the lists as int64 arrays.
+
+    The checks: exonCount starts and exonCount ends, every exon end > its start, and starts and ends that do not
+    decrease. They run on the flat arrays of _parse_exon_lists; the result is the one of the row-by-row checks.
+    """
+    (start_values, n_starts), (end_values, n_ends) = starts, ends
+    count = refflat_df["exonCount"].to_numpy()
+    right_count = np.flatnonzero((n_starts == count) & (n_ends == count))  # other rows are dropped
+    lens = count[right_count]  # > 0: exonCount > 0 was checked before
+    within = np.arange(lens.sum()) - np.repeat(np.cumsum(lens) - lens, lens)  # exon index within its row
+    exon_start = start_values[np.repeat((np.cumsum(n_starts) - n_starts)[right_count], lens) + within]
+    exon_end = end_values[np.repeat((np.cumsum(n_ends) - n_ends)[right_count], lens) + within]
+    later = within > 0
+    bad = exon_end <= exon_start
+    bad[later] |= (exon_start[1:] < exon_start[:-1])[later[1:]] | (exon_end[1:] < exon_end[:-1])[later[1:]]
+    row_bad = np.zeros(len(right_count), dtype=bool)
+    row_bad[np.repeat(np.arange(len(right_count)), lens)[bad]] = True
+
+    split = np.cumsum(lens)[:-1]
+    good = ~row_bad
+    starts_col = np.empty(int(good.sum()), dtype=object)
+    ends_col = np.empty(int(good.sum()), dtype=object)
+    for i, (a, b) in enumerate(
+        (a, b) for a, b, g in zip(np.split(exon_start, split), np.split(exon_end, split), good) if g
+    ):
+        starts_col[i] = a.copy()
+        ends_col[i] = b.copy()
+    kept = refflat_df.iloc[right_count[good]].copy()
+    kept["exonStarts"] = starts_col
+    kept["exonEnds"] = ends_col
+    return kept
+
+
+def _keep_valid_exons_by_row(refflat_df):
+    """_keep_valid_exons for exon lists that are not plain integer lists: parsed and checked one row at a time."""
+    refflat_df = refflat_df.copy()
+    refflat_df["exonStarts"] = refflat_df["exonStarts"].apply(_parse_exon_array)
+    refflat_df["exonEnds"] = refflat_df["exonEnds"].apply(_parse_exon_array)
+    refflat_df = refflat_df[refflat_df["exonStarts"].apply(len) == refflat_df["exonCount"]]
+    refflat_df = refflat_df[refflat_df["exonEnds"].apply(len) == refflat_df["exonCount"]]
+    refflat_df = refflat_df[refflat_df.apply(lambda x: np.all(x["exonEnds"] > x["exonStarts"]), axis=1)]
+    refflat_df = refflat_df[refflat_df.apply(lambda x: np.all(x["exonStarts"][1:] >= x["exonStarts"][:-1]), axis=1)]
+    refflat_df = refflat_df[refflat_df.apply(lambda x: np.all(x["exonEnds"][1:] >= x["exonEnds"][:-1]), axis=1)]
+    return refflat_df
 
 
 def parse_refflat(refflat_path):
@@ -263,6 +218,7 @@ def parse_refflat(refflat_path):
     `cdsStart`, `cdsEnd`, `exonCount`, `exonStarts`, `exonEnds`.
 
     It accepts three formats based on column count:
+
     * 11 columns (RefFlat): drops the first column.
     * 15 columns (RefGene): keeps the first 10 columns.
     * 10 columns (GenePred): uses as-is.
@@ -276,22 +232,19 @@ def parse_refflat(refflat_path):
         refflat_path (str): Path to the annotation file.
 
     Returns:
-        pandas.DataFrame: Normalized and validated annotation indexed by `transcript_id`.
-            Columns:
-            - `chrom` (str)
-            - `strand` (str; '+' or '-')
-            - `txStart`, `txEnd`, `cdsStart`, `cdsEnd` (int)
-            - `exonCount` (int)
-            - `exonStarts`, `exonEnds` (numpy.ndarray of int; 0-based, half-open)
+        pandas.DataFrame: Normalized and validated annotation indexed by `transcript_id`, with the columns
+        `chrom` (str), `strand` (str; '+' or '-'), `txStart`, `txEnd`, `cdsStart`, `cdsEnd` (int), `exonCount` (int),
+        and `exonStarts`, `exonEnds` (numpy.ndarray of int; 0-based, half-open).
 
     Raises:
-        ValueError: If the file has an unexpected number of columns or if no valid
+        ValueError: If the file has an unexpected number of columns, a strand other than
+            '+' or '-' (the message names the first such transcript), or if no valid
             transcripts remain after validation.
 
     Notes:
         * Validation ensures: `txEnd > txStart`, `cdsEnd >= cdsStart`, `exonCount > 0`,
-            `len(exonStarts) == len(exonEnds) == exonCount`, strictly positive exon lengths,
-            and non-decreasing starts/ends across exons.
+          `len(exonStarts) == len(exonEnds) == exonCount`, strictly positive exon lengths,
+          and non-decreasing starts/ends across exons.
     """
     col_list = [
         "transcript_id",
@@ -318,6 +271,13 @@ def parse_refflat(refflat_path):
         )
 
     refflat_df.columns = col_list
+    bad_strand = ~refflat_df["strand"].isin(["+", "-"])
+    if bad_strand.any():
+        first = refflat_df[bad_strand].iloc[0]
+        raise ValueError(
+            f"Invalid strand {first['strand']!r} for transcript {first['transcript_id']} in {refflat_path} "
+            f"({int(bad_strand.sum())} rows have a strand other than '+' or '-')."
+        )
     refflat_df[["txStart", "txEnd", "cdsStart", "cdsEnd", "exonCount"]] = refflat_df[
         ["txStart", "txEnd", "cdsStart", "cdsEnd", "exonCount"]
     ].astype(np.int64)
@@ -325,13 +285,12 @@ def parse_refflat(refflat_path):
     refflat_df = refflat_df[refflat_df["txEnd"] > refflat_df["txStart"]]
     refflat_df = refflat_df[refflat_df["cdsEnd"] >= refflat_df["cdsStart"]]
     refflat_df = refflat_df[refflat_df["exonCount"] > 0]
-    refflat_df["exonStarts"] = refflat_df["exonStarts"].apply(_parse_exon_array)
-    refflat_df["exonEnds"] = refflat_df["exonEnds"].apply(_parse_exon_array)
-    refflat_df = refflat_df[refflat_df["exonStarts"].apply(len) == refflat_df["exonCount"]]
-    refflat_df = refflat_df[refflat_df["exonEnds"].apply(len) == refflat_df["exonCount"]]
-    refflat_df = refflat_df[refflat_df.apply(lambda x: np.all(x["exonEnds"] > x["exonStarts"]), axis=1)]
-    refflat_df = refflat_df[refflat_df.apply(lambda x: np.all(x["exonStarts"][1:] >= x["exonStarts"][:-1]), axis=1)]
-    refflat_df = refflat_df[refflat_df.apply(lambda x: np.all(x["exonEnds"][1:] >= x["exonEnds"][:-1]), axis=1)]
+    starts = _parse_exon_lists(refflat_df["exonStarts"])
+    ends = _parse_exon_lists(refflat_df["exonEnds"])
+    if starts is not None and ends is not None:
+        refflat_df = _keep_valid_exons(refflat_df, starts, ends)
+    else:
+        refflat_df = _keep_valid_exons_by_row(refflat_df)
     refflat_df.drop_duplicates(subset="transcript_id", keep="first", inplace=True, ignore_index=True)
 
     if len(refflat_df) == 0:
@@ -341,102 +300,147 @@ def parse_refflat(refflat_path):
     return refflat_df
 
 
-def pileup_genomic(args, input_df):
-    def pileup_genomic(args, input_df):
-        """
-        Aggregate per-genomic-position metrics using multiprocessing.
+# A transcript name with its version: ENST00000123456.7 -> ENST00000123456, NM_005517.4 -> NM_005517
+_VERSIONED_NAME = re.compile(r"^(.+)\.\d+$")
 
-        Spawns up to `args.thread` worker processes to convert transcript-relative
-        positions to genomic coordinates and aggregate metrics across all input rows.
-        Requires an annotation file path at `args.annot`.
 
-        The final output is a DataFrame aggregated by `(chrom, strand, pos)` with
-        derived columns:
-        * `stoichiometry` = `kl_div_pos` / (`kl_div_neg` + `kl_div_pos`)
-        * `modscore` = a modification prediction score.
+def _annotation_rows(names, annotation_index):
+    """Row of each transcript name in the annotation: the exact name, or else the name without its version (.N), as
+    annotations often have it (Ensembl names, and RefSeq names in UCSC tables).
 
-        Args:
-            args (argparse.Namespace): Must contain:
-                - `annot` (str or path-like): Path to RefFlat/RefGene/GenePred file.
-                - `thread` (int): Number of worker processes to spawn.
-            input_df (pandas.DataFrame): Input rows containing at least:
-                - `ref_names` (str): Transcript ID; will be renamed to `transcript_id`.
-                - `ref_pos` (int): Transcript-relative position (0-based).
-                - `kl_div_neg`, `kl_div_pos`, `count_all`, `count_pos`, `logsum_1_p_pos`:
-                Metric columns to be summed.
+    Returns:
+        tuple: (row per name, -1 when not found; number of names found exactly; number found without the version).
+    """
+    rows = annotation_index.get_indexer(names)
+    retry = np.flatnonzero(rows < 0)
+    n_exact = len(rows) - len(retry)
+    n_unversioned = 0
+    if retry.size:
+        bare = [_VERSIONED_NAME.sub(r"\1", str(name)) for name in names[retry]]
+        changed = np.array([b != str(name) for b, name in zip(bare, names[retry])], dtype=bool)
+        if changed.any():
+            found = annotation_index.get_indexer(pd.Index(np.array(bare, dtype=object)[changed]))
+            rows[retry[changed]] = found
+            n_unversioned = int((found >= 0).sum())
+    return rows, n_exact, n_unversioned
 
-        Returns:
-            pandas.DataFrame: Aggregated DataFrame with columns:
-                `chrom`, `strand`, `pos`, `modscore`, `stoichiometry`,
-                `count_all`, `count_pos`.
 
-        Raises:
-            ValueError: If no valid genomic positions are produced (e.g., due to
-                mismatched or invalid annotations).
+def _map_to_genome(names, positions, refflat_df):
+    """Genomic positions of transcript sites; `TranscriptMapper` for all transcripts at once.
 
-        Notes:
-            * Uses a `multiprocessing.Manager().list()` to collect per-process results.
-            * `load_split_data` is used to balance workload across processes.
-            * The output `pos` is 0-based genomic coordinate (float in intermediate steps,
-                but will be integral where valid).
-        """
+    The exons of every annotated transcript are laid end to end in transcript order (reversed for '-'), so one
+    searchsorted finds the exon of every site.
 
+    Args:
+        names (numpy.ndarray): Transcript name per site.
+        positions (numpy.ndarray): 0-based transcript position per site.
+        refflat_df (pandas.DataFrame): The output of parse_refflat.
+
+    Returns:
+        tuple: (indices of the sites that map, their chrom, strand and 0-based genomic position).
+    """
+    codes, transcripts = pd.factorize(names, sort=False)
+    rows, n_exact, n_unversioned = _annotation_rows(np.asarray(transcripts, dtype=object), refflat_df.index)
+    n_missing = int((rows < 0).sum())
+    example = f", for example {transcripts[np.flatnonzero(rows < 0)[0]]}" if n_missing else ""
+    # a warning when sites are left out, so that a mismatched annotation does not go unnoticed
+    log.log(
+        logging.WARNING if n_missing else logging.INFO,
+        f"Genomic pileup: {n_exact} of {len(transcripts)} transcripts matched the annotation by name, "
+        f"{n_unversioned} after removing the version, {n_missing} not found{example} (their sites are left out).",
+    )
+    if n_unversioned:
+        log.warning(
+            f"{n_unversioned} transcripts matched the annotation only without their version; where the two "
+            "versions have different exons, their genomic positions follow the annotation's version."
+        )
+    present = np.flatnonzero(rows >= 0)
+    if present.size == 0:
+        empty = np.empty(0, dtype=np.int64)
+        return empty, np.empty(0, dtype=object), np.empty(0, dtype=object), empty
+
+    annotated = refflat_df.iloc[rows[present]]
+    plus = annotated["strand"].to_numpy() == "+"
+    starts = annotated["exonStarts"].tolist()
+    ends = annotated["exonEnds"].tolist()
+    n_exons = np.array([len(x) for x in starts], dtype=np.int64)
+    first = np.cumsum(n_exons) - n_exons
+    within = np.arange(n_exons.sum()) - np.repeat(first, n_exons)
+    exon_plus = np.repeat(plus, n_exons)
+    order = np.where(exon_plus, np.repeat(first, n_exons) + within, np.repeat(first + n_exons - 1, n_exons) - within)
+    exon_start = np.concatenate(starts).astype(np.int64)[order]
+    exon_end = np.concatenate(ends).astype(np.int64)[order]
+    exon_len = exon_end - exon_start
+    tx_len = np.add.reduceat(exon_len, first)
+    tx_offset = np.cumsum(tx_len) - tx_len  # start of each transcript in the laid-out coordinates
+    exon_offset = np.cumsum(exon_len) - exon_len  # start of each exon in the same coordinates
+
+    tx_of_site = np.full(len(transcripts), -1, dtype=np.int64)
+    tx_of_site[present] = np.arange(len(present))
+    tx_of_site = tx_of_site[codes]
+    positions = np.asarray(positions, dtype=np.int64)
+    inside = tx_of_site >= 0
+    inside[inside] = (positions[inside] >= 0) & (positions[inside] < tx_len[tx_of_site[inside]])
+    sites = np.flatnonzero(inside)
+    tx = tx_of_site[sites]
+    laid_out = tx_offset[tx] + positions[sites]
+    exon = np.searchsorted(exon_offset, laid_out, side="right") - 1
+    offset = laid_out - exon_offset[exon]
+    genomic = np.where(plus[tx], exon_start[exon] + offset, exon_end[exon] - offset - 1)
+    chrom = annotated["chrom"].to_numpy()[tx]
+    strand = np.where(plus[tx], "+", "-").astype(object)
+    return sites, chrom, strand, genomic
+
+
+def pileup_genomic(input_df, annot, sum_columns):
+    """Adds up per-site sums in genomic coordinates.
+
+    Every transcript site is mapped to its genomic position (as `TranscriptMapper` maps it) and the sums are added up
+    per (chrom, strand, pos). A site on the transcript's strand ('+' in `ref_strand`) gets the transcript's genomic
+    strand; a site on the opposite strand ('-', from reads aligned in reverse) is the same genomic base on the other
+    genomic strand, so it gets a row of its own. Transcripts are found in the annotation by their exact name, or else
+    by the name without its version (.N); transcripts not in the annotation, and sites outside a transcript's exons,
+    are left out. The scores (modscore, stoichiometry) are not computed here: `deeprm.inference.pileup_deeprm`
+    computes them from the summed table, the same way as for the transcript table.
+
+    Args:
+        input_df (pandas.DataFrame): One row per transcript site, with these columns:
+
+            - `ref_names` (str): Transcript ID.
+            - `ref_pos` (int): Transcript-relative position (0-based).
+            - The columns named in `sum_columns`.
+            - Optionally `ref_strand` (str): '+' for a site on the transcript's strand, '-' for the opposite strand.
+              Without it, every site is on the transcript's strand.
+
+        annot (str): Path to a RefFlat/RefGene/GenePred file.
+        sum_columns (list): The per-site sum columns to add up. Other columns of `input_df` are not carried over.
+
+    Returns:
+        pandas.DataFrame: `chrom`, `strand`, `pos` (0-based genomic position, int64) and the `sum_columns`, summed
+        over the transcript sites that map to each genomic position, sorted by (chrom, strand, pos).
+
+    Raises:
+        ValueError: If `input_df` is empty, or no valid genomic position is produced (e.g., due to mismatched or
+            invalid annotations).
+    """
     if len(input_df) == 0:
         raise ValueError("input_df is empty. No transcript pileup entries were provided.")
+    sum_columns = list(sum_columns)
 
-    n_proc = getattr(args, "thread", None)
-    if n_proc is None:
-        n_proc = max(1, int(0.95 * mp.cpu_count()))
-    if n_proc <= 0:
-        raise ValueError("args.thread must be a positive integer.")
-
-    refflat_df = parse_refflat(args.annot)
-    df_list_split = load_split_data(input_df, n_proc)
-    if len(df_list_split) == 0:
-        raise ValueError("No transcript groups were available for genomic aggregation.")
-
-    man = mp.Manager()
-    collect_list = man.list()
-    proc_list = []
-
-    for df_list in df_list_split:
-        proc = mp.Process(target=worker, args=(df_list, refflat_df, collect_list))
-        proc.start()
-        proc_list.append(proc)
-    for proc in proc_list:
-        proc.join()
-        if proc.exitcode != 0:
-            raise RuntimeError(f"Genomic pileup worker exited with code {proc.exitcode}.")
-
-    collect_list = list(collect_list)
-    man.shutdown()
-
-    if len(collect_list) == 0:
+    refflat_df = parse_refflat(annot)
+    sites, chrom, strand, pos = _map_to_genome(
+        input_df["ref_names"].to_numpy(), input_df["ref_pos"].to_numpy(), refflat_df
+    )
+    if len(sites) == 0:
         raise ValueError("No valid genomic position found. Please verify the annotation file.")
+    if "ref_strand" in input_df:
+        # a '-' site is an A on the strand opposite the transcript: the same base, on the other genomic strand
+        opposite = input_df["ref_strand"].to_numpy()[sites] == "-"
+        strand = np.where(opposite, np.where(strand == "+", "-", "+"), strand).astype(object)
 
-    df = pd.concat(collect_list, ignore_index=True)
-    gc.collect()
-
-    df = df.groupby(["chrom", "strand", "pos"], as_index=False).agg(
-        {
-            "kl_div_neg": "sum",
-            "kl_div_pos": "sum",
-            "count_all": "sum",
-            "logsum_1_p_pos": "sum",
-            "count_pos": "sum",
-        }
-    )
-
-    epsilon = getattr(args, "epsilon", 1e-30)
-    digitization = 1000
-    df["stoichiometry"] = df["kl_div_pos"] / (df["kl_div_neg"] + df["kl_div_pos"] + epsilon)
-    df["modscore"] = 1 - np.power(
-        10, df["logsum_1_p_pos"] / df["count_all"] * (1 + np.power(10, 2 * (df["stoichiometry"] - 1)))
-    )
-    df["modscore"] = np.digitize(df["modscore"], np.linspace(0, 1, digitization + 1), right=True) / digitization
-    df["stoichiometry"] = df["stoichiometry"] * (
-        (np.log10(1 - args.threshold) * df["stoichiometry"]) > (df["logsum_1_p_pos"] / df["count_all"])
-    )
-    df = df[["chrom", "strand", "pos", "modscore", "stoichiometry", "count_all", "count_pos"]]
+    df = pd.DataFrame({"chrom": chrom, "strand": strand, "pos": pos})
+    for col in sum_columns:
+        df[col] = input_df[col].to_numpy()[sites]
+    df = df.groupby(["chrom", "strand", "pos"], as_index=False).agg({col: "sum" for col in sum_columns})
     df["pos"] = df["pos"].astype(np.int64)
     return df

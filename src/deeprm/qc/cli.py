@@ -17,9 +17,9 @@ def parser() -> argparse.ArgumentParser:
     gp = argparse.ArgumentParser(prog="deeprm qc", description="DeepRM QC Module", add_help=True)
     sub = gp.add_subparsers(dest="cmd", metavar="{run,alignment,block}")
     for name, help_text in [
-        ("run", "Basic QC summaries"),
-        ("alignment", "Inspect alignments and metrics"),
-        ("block", "Inspect block-level signals"),
+        ("run", "Plot read length, base quality and poly(A) length of a BAM"),
+        ("alignment", "Plot alignment error rates of a BAM"),
+        ("block", "Plot the training data of deeprm train prep or DeepRM v1.1"),
     ]:
         sub.add_parser(name, help=help_text, add_help=False)
     return gp

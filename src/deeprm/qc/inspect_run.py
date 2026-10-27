@@ -1,7 +1,8 @@
 """
 DeepRM QC Module: Inspect Basecalled Run
 
-Open a bam file and get the stats of read, then plot.
+Open a bam file and get the stats of read, then plot:
+
 1. Read length distribution
 2. Quality score distribution
 """
@@ -40,16 +41,48 @@ def add_arguments(parser: argparse.ArgumentParser):
     Returns:
         None
     """
-    parser.add_argument("--input", "-i", dest="bam_path", type=str, required=True, help="Input bam file")
-    parser.add_argument("--output", "-o", dest="out_path", type=str, required=True, help="Output directory")
     parser.add_argument(
-        "--process", "-p", dest="process", type=int, default=int(mp.cpu_count() * 0.95 // 4), help="Number of processes"
+        "--input",
+        "-i",
+        dest="bam_path",
+        type=str,
+        required=True,
+        help="BAM file of basecalled reads (indexed first if it has no .bai index)",
     )
-    parser.add_argument("--threads", "-t", dest="threads", type=int, default=4, help="Number of threads")
-    parser.add_argument("--bq", "-q", dest="bq_thres", type=int, default=7, help="Base quality threshold")
-    parser.add_argument("--bb", "-b", dest="bb_length", type=int, default=87, help="BB length")
-    parser.add_argument("--mrna", "-m", action="store_true", help="mRNA mode")
-    parser.add_argument("--len", "-l", dest="len_cutoff", type=int, default=200, help="Length cutoff")
+    parser.add_argument("--output", "-o", dest="out_path", type=str, required=True, help="Output folder")
+    parser.add_argument(
+        "--process",
+        "-p",
+        dest="process",
+        type=int,
+        default=int(mp.cpu_count() * 0.95 // 4),
+        help="Number of worker processes (default: about a quarter of the CPUs)",
+    )
+    parser.add_argument(
+        "--threads", "-t", dest="threads", type=int, default=4, help="BAM decompression threads per process"
+    )
+    parser.add_argument(
+        "--bq",
+        "-q",
+        dest="bq_thres",
+        type=int,
+        default=7,
+        help="Mean base quality that splits the reads into passed and failed in the plots",
+    )
+    parser.add_argument(
+        "--bb",
+        "-b",
+        dest="bb_length",
+        type=int,
+        default=87,
+        help="Building-block length in bases; the read-length plot marks its multiples (not used with --mrna)",
+    )
+    parser.add_argument(
+        "--mrna", "-m", action="store_true", help="Plot read lengths for mRNA reads instead of oligonucleotide reads"
+    )
+    parser.add_argument(
+        "--len", "-l", dest="len_cutoff", type=int, default=200, help="Skip reads shorter than this (0: keep all reads)"
+    )
     return None
 
 
@@ -142,7 +175,7 @@ def plot_read_len_oligo(read_len_arr, mean_qual_arr, bq_thres, out_path, bb_leng
         mean_qual_arr (numpy.ndarray): Array of mean quality scores.
         bq_thres (int): Base quality threshold.
         out_path (str): Output directory path.
-        bb_length (int): Length of the barcode.
+        bb_length (int): Length of one building block (BB) in bases (``--bb``, default 87).
 
     Returns:
         None

@@ -16,7 +16,6 @@ import numpy as np
 import tqdm
 
 from deeprm.utils.logging import get_logger
-from deeprm.utils.memory import start_mem_watchdog
 
 log = get_logger(__name__)
 
@@ -24,26 +23,54 @@ log = get_logger(__name__)
 def add_arguments(parser: argparse.ArgumentParser):
     """
     Adds command-line arguments.
+
     Args:
         parser (argparse.ArgumentParser): Argument parser to which arguments will be added.
     Returns:
         None
     """
 
-    parser.add_argument("--pos", "-p", dest="pos_path", type=str, default=None, nargs="+", help="Positive token files")
-    parser.add_argument("--neg", "-n", dest="neg_path", type=str, default=None, nargs="+", help="Negative token files")
-    parser.add_argument("--output", "-o", dest="out_path", type=str, required=True, help="Output directory")
+    parser.add_argument(
+        "--pos",
+        "-p",
+        dest="pos_path",
+        type=str,
+        default=None,
+        nargs="+",
+        help="Folders of modified (positive) training data: the data folders that deeprm train prep writes",
+    )
+    parser.add_argument(
+        "--neg",
+        "-n",
+        dest="neg_path",
+        type=str,
+        default=None,
+        nargs="+",
+        help="Folders of unmodified (negative) training data: the data folders that deeprm train prep writes",
+    )
+    parser.add_argument(
+        "--output", "-o", dest="out_path", type=str, required=True, help="Output folder; it must not exist yet"
+    )
     parser.add_argument(
         "--thread",
         "-t",
         dest="cpu",
         type=int,
         default=int(os.cpu_count() * 0.9),
-        help="Number of threads to use",
+        help="Number of worker processes (default: 90%% of the CPUs)",
     )
-    parser.add_argument("--chunk", "-c", dest="chunk", type=int, default=4000, help="Chunk size")
-    parser.add_argument("--score", "-s", dest="score", type=float, default=1.0, help="Score threshold")
-    parser.add_argument("--val-frac", "-v", type=float, default=0.05, help="Validation set fraction")
+    parser.add_argument("--chunk", "-c", dest="chunk", type=int, default=4000, help="Rows per output file")
+    parser.add_argument(
+        "--score",
+        "-s",
+        dest="score",
+        type=float,
+        default=1.0,
+        help="Keep the blocks with a block score of at least this",
+    )
+    parser.add_argument(
+        "--val-frac", "-v", type=float, default=0.05, help="Fraction of the blocks put in val/; the rest go to train/"
+    )
     return None
 
 
@@ -59,10 +86,14 @@ def main(args: argparse.Namespace):
     """
 
     if os.path.exists(args.out_path):
-        log.error(f"Output directory {args.out_path} already exists")
-        raise FileExistsError(f"{args.out_path} already exists")
-    else:
-        os.makedirs(args.out_path)
+        raise ValueError(f"{args.out_path} already exists. Use a new --output folder, or remove that one first.")
+    for in_path in (args.pos_path or []) + (args.neg_path or []):
+        if not _token_files(in_path):
+            raise ValueError(
+                f"{in_path} holds no token files (*.npz). Give the token folder of deeprm train prep, "
+                "<prep output>/data."
+            )
+    os.makedirs(args.out_path)
 
     if args.pos_path is None:
         log.warning("No positive token files specified")
@@ -111,7 +142,27 @@ def main(args: argparse.Namespace):
             score=args.score,
         )
 
+    # deeprm train run needs every split it reads to hold files; small inputs can leave one empty
+    labels = [name for name, given in (("pos", args.pos_path), ("neg", args.neg_path)) if given is not None]
+    empty = [
+        f"{set_name}/{label}"
+        for set_name, fraction in set_split_dict.items()
+        if fraction > 0
+        for label in labels
+        if not glob.glob(f"{args.out_path}/{set_name}/{label}/*.npz")
+    ]
+    if empty:
+        raise ValueError(
+            f"No files were written for {', '.join(empty)}: the input has too few rows of block score >= {args.score} "
+            f"for chunks of {args.chunk} rows. Remove {args.out_path}, then run again with a smaller --chunk (for "
+            "example -c 1000), or with more input data."
+        )
     return None
+
+
+def _token_files(in_path):
+    """The token files of a prep output folder; a temporary file left by an interrupted write is not one."""
+    return sorted(p for p in glob.glob(os.path.join(in_path, "*.npz")) if ".tmp." not in os.path.basename(p))
 
 
 def sample_and_save(
@@ -146,7 +197,7 @@ def sample_and_save(
     Returns:
         None
     """
-    in_file_list = [x for in_path in in_path_list for x in glob.glob(os.path.join(in_path, "*.npz"))]
+    in_file_list = [x for in_path in in_path_list for x in _token_files(in_path)]
     column_keys = [
         "segment_len_arr",
         "signal_token",
@@ -192,6 +243,9 @@ def sample_and_save(
 
     for proc in proc_list:
         proc.join()
+    failed = [proc.exitcode for proc in proc_list if proc.exitcode != 0]
+    if failed:
+        raise RuntimeError(f"{len(failed)} compile worker(s) failed (exit codes {failed}); the output is incomplete.")
 
     pid = ncpu
     file_id = [-1]
@@ -277,8 +331,6 @@ def sample_and_save_worker(
     Returns:
         None
     """
-    start_mem_watchdog()
-
     file_id = [-1]
     data_buffer = {x: [] for x in column_keys}
     buffer_dict = {key: None for key in remainder_dict.keys()}

@@ -9,8 +9,8 @@ sys.path.insert(0, os.path.abspath("../../src"))
 # ─── Basic project info ───────────────────────────────────────────────────────
 project = "DeepRM"
 author = "Laboratory of Computational Biology, School of Biological Sciences, Seoul National University"
-copyright = "2025, Laboratory of Computational Biology, School of Biological Sciences, Seoul National University"
-release = "1.1.3"
+copyright = "2025-2026, Seoul National University R&DB Foundation and Genome4me Inc."
+release = "1.2"
 
 # ─── Extensions ───────────────────────────────────────────────────────────────
 
@@ -20,7 +20,6 @@ extensions = [
     "sphinx.ext.autosummary",
     "sphinx.ext.napoleon",
     "sphinx.ext.intersphinx",
-    "sphinx.ext.viewcode",
     "sphinx.ext.todo",
     "sphinxcontrib.mermaid",
     "sphinx_copybutton",
@@ -40,9 +39,6 @@ exclude_patterns = []
 
 # --- Autodoc look & feel ---
 autodoc_default_options = {
-    "members": True,
-    "undoc-members": False,
-    "inherited-members": True,
     "show-inheritance": True,
     "member-order": "bysource",
 }
@@ -74,7 +70,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.abspath("../../src"))  # if using src/ layout
-autodoc_mock_imports = ["torch", "pysam", "pod5", "pandas", "sklearn", "scipy", "tqdm", "matplotlib"]
+autodoc_mock_imports = ["torch", "pysam", "pod5", "pandas", "sklearn", "scipy", "tqdm", "matplotlib", "flash_attn"]
 
 # -- Intersphinx cross-links (optional) --------------------------------------
 intersphinx_mapping = {
@@ -83,3 +79,27 @@ intersphinx_mapping = {
     "pandas": ("https://pandas.pydata.org/docs/", {}),
     "torch": ("https://pytorch.org/docs/stable/", {}),  # <-- add this
 }
+
+
+# --- Option names keep their two hyphens ----------------------------------------
+# Smart quotes would turn "--method" into an en dash ("–method"). smartquotes_action "qe" keeps quotes and ellipses
+# only, on every page; the option lists that sphinx-argparse writes, and the option-group sections around them, are
+# also left out of smart quotes entirely.
+from docutils import nodes as _nodes
+from sphinx.transforms import SphinxTransform as _SphinxTransform
+
+smartquotes_action = "qe"
+
+
+class _OptionListsKeepHyphens(_SphinxTransform):
+    default_priority = 740  # before Sphinx's smart quotes (750)
+
+    def apply(self, **kwargs):
+        for option_list in self.document.findall(_nodes.option_list):
+            option_list["support_smartquotes"] = False
+            if isinstance(option_list.parent, _nodes.section):
+                option_list.parent["support_smartquotes"] = False
+
+
+def setup(app):
+    app.add_transform(_OptionListsKeepHyphens)

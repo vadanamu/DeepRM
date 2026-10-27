@@ -13,10 +13,12 @@
  *
  **************************************************************************************************/
 
-#include "Utils.h"
+#include "utils/Utils.h"
+
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+
 #ifdef USE_MPFR
 #include <mpfr.h>
 #endif
@@ -81,11 +83,13 @@ vector<float> Utils::move_to_dwell(const vector<bool>& move,
     return dwell_times;
   }
 
-  float quantile_a_value = quantile(dwell_times, static_cast<float>(quantile_a));
-  float quantile_b_value = quantile(dwell_times, static_cast<float>(quantile_b));
+  float quantile_a_value = quantile(dwell_times, quantile_a);
+  float quantile_b_value = quantile(dwell_times, quantile_b);
 
-  float q_shift = max(0.1, shift_mult * (quantile_a_value + quantile_b_value));
-  float q_scale = max(0.1, scale_mult * (quantile_b_value - quantile_a_value));
+  // Single precision throughout, as numpy 2 does with a Python float times a
+  // float32 (NEP 50): the multipliers are rounded to float first.
+  float q_shift = max(0.1f, static_cast<float>(shift_mult) * (quantile_a_value + quantile_b_value));
+  float q_scale = max(0.1f, static_cast<float>(scale_mult) * (quantile_b_value - quantile_a_value));
 
   // Vectorize dwell time normalization
 #pragma GCC ivdep
@@ -108,8 +112,11 @@ vector<vector<double>> Utils::normalize_trim_segment_signal(
   vector<double> trimmed_signal(signal.begin() + sp, signal.end());
   int signal_len = static_cast<int>(trimmed_signal.size());
 
+  // signal[sp:][ts:ns] as numpy slices it: an ns past the end stops at the end, and an empty slice
+  // (ts at or after ns) drops the read.
   if (ns == 0) ns = signal_len;
-  if (ts >= signal_len || ns > signal_len) {
+  if (ns > signal_len) ns = signal_len;
+  if (ts >= ns) {
     return {};
   }
 
@@ -133,15 +140,27 @@ vector<vector<double>> Utils::normalize_trim_segment_signal(
     processed_signal[i] = (processed_signal[i] - q_shift) / q_scale;
   }
 
+  // np.where(move)[0][1:] * sampling: every move but the FIRST TRUE one (not index 0).
   vector<int> move_indices;
-  for (size_t i = 1; i < move.size(); ++i) {
+  bool first_move_seen = false;
+  for (size_t i = 0; i < move.size(); ++i) {
     if (move[i]) {
+      if (!first_move_seen) {
+        first_move_seen = true;
+        continue;
+      }
       move_indices.push_back(static_cast<int>(i) * sampling);
     }
   }
 
   for (int& idx : move_indices) {
     idx = static_cast<int>(processed_signal.size()) - idx;
+  }
+  // A move table longer than the signal (the BAM and the POD5 do not fit each other) would put some
+  // split points at or before the start; the read is dropped, as in the Python preprocessing.
+  if (!move_indices.empty() && move_indices.back() <= 0) {
+    move_past_signal.fetch_add(1, memory_order_relaxed);
+    return {};
   }
   reverse(move_indices.begin(), move_indices.end());
 
@@ -163,24 +182,12 @@ vector<vector<double>> Utils::normalize_trim_segment_signal(
   return segments;
 }
 
-vector<uint16_t> Utils::create_segment_len_arr(
-  const vector<vector<float>>& segment_arr, int sampling)
+vector<size_t> Utils::split_sizes(size_t n, int parts)
 {
-  vector<uint16_t> lengths;
-  for (const auto& segment : segment_arr) {
-    lengths.push_back(static_cast<uint16_t>(segment.size() / sampling));
-  }
-  return lengths;
-}
-
-vector<float> Utils::concatenate_segments(
-  const vector<vector<float>>& segments)
-{
-  vector<float> result;
-  for (const auto& segment : segments) {
-    result.insert(result.end(), segment.begin(), segment.end());
-  }
-  return result;
+  vector<size_t> sizes(parts, n / parts);
+  for (size_t i = 0; i < n % parts; ++i)
+    ++sizes[i];
+  return sizes;
 }
 
 vector<double> Utils::segmented_signal_to_block_range(
@@ -206,7 +213,8 @@ vector<double> Utils::segmented_signal_to_block_range(
     }
     int r_skip = (r_skip_sum - lr_pad) * sampling;
 
-    // Concatenate only the range of segments without copying
+    // Concatenate only [start_idx, end_idx) straight into one reserved buffer;
+    // segments outside the range are never touched and no sub-list is built.
     vector<double> concatenated;
     size_t total_size = 0;
     for (int i = start_idx; i < end_idx; ++i) {

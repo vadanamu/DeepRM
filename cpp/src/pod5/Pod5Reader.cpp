@@ -1,6 +1,6 @@
 /***************************************************************************************************
  *
- * Copyright (C) 2025 Genome4me Incorporated - All Rights Reserved.
+ * Copyright (C) 2025-2026 Genome4me Incorporated - All Rights Reserved.
  *
  * This software, including its source code, embedded concepts, and associated
  * documentation, is proprietary to Genome4me Incorporated and is protected
@@ -13,15 +13,18 @@
  *
  **************************************************************************************************/
 
-#include "Pod5Reader.h"
-#include <iostream>
-#include <filesystem>
+#include "pod5/Pod5Reader.h"
+
 #include <glob.h>
-#include <stdexcept>
+
 #include <cstdlib>
-#include <string>
-#include <sstream>
+#include <filesystem>
 #include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <utility>
 
 namespace deeprm {
   Pod5Reader::Pod5Reader(const string& path) : pod5_path(path)
@@ -30,25 +33,6 @@ namespace deeprm {
 
   Pod5Reader::~Pod5Reader()
   {
-  }
-
-  string Pod5Reader::read_id_to_string(const read_id_t& read_id)
-  {
-    stringstream ss;
-    ss << hex << setfill('0');
-
-    // Convert UUID bytes to standard UUID string format
-    for (int i = 0; i < 4; ++i) ss << setw(2) << static_cast<unsigned>(read_id[i]);
-    ss << "-";
-    for (int i = 4; i < 6; ++i) ss << setw(2) << static_cast<unsigned>(read_id[i]);
-    ss << "-";
-    for (int i = 6; i < 8; ++i) ss << setw(2) << static_cast<unsigned>(read_id[i]);
-    ss << "-";
-    for (int i = 8; i < 10; ++i) ss << setw(2) << static_cast<unsigned>(read_id[i]);
-    ss << "-";
-    for (int i = 10; i < 16; ++i) ss << setw(2) << static_cast<unsigned>(read_id[i]);
-
-    return ss.str();
   }
 
   bool Pod5Reader::parse_single_pod5_meta(const string& file_path,
@@ -92,9 +76,11 @@ namespace deeprm {
         Pod5ReadRecordBatch_t* batch = nullptr;
         error = pod5_get_read_batch(&batch, reader, batch_index);
         if (error != POD5_OK) {
+          // A batch that cannot be read makes the whole file unreadable: its reads would be lost.
           cerr << "Failed to get batch " << batch_index
               << ": " << pod5_get_error_string() << endl;
-          continue;
+          pod5_close_and_free_reader(reader);
+          return false;
         }
 
         // Get batch row count
@@ -104,7 +90,8 @@ namespace deeprm {
           cerr << "Failed to get batch row count: " << pod5_get_error_string() <<
               endl;
           pod5_free_read_batch(batch);
-          continue;
+          pod5_close_and_free_reader(reader);
+          return false;
         }
 
         // Process each row (read) in batch - metadata only
@@ -119,15 +106,19 @@ namespace deeprm {
           if (error != POD5_OK) {
             cerr << "Failed to get row info for row " << row
                 << ": " << pod5_get_error_string() << endl;
-            continue;
+            pod5_free_read_batch(batch);
+            pod5_close_and_free_reader(reader);
+            return false;
           }
 
           // Convert read ID to string
-          meta.read_id = read_id_to_string(row_info.read_id);
+          meta.read_id = uuid128_from_bytes(row_info.read_id);
 
-          // Store file path and reader pointer
-          meta.file_path = file_path;
-          meta.reader = reader;
+          // `reader` keeps its null default and file_index is filled by the
+          // catalog. Every consumer (streaming worker and file-mode worker
+          // alike) opens its own reader per file and sets the field right
+          // before use, so keeping the scan reader alive here only pinned
+          // Arrow memory (~24 GB measured at 99 files) for the whole run.
           meta.batch_index = batch_index;
           meta.row_index = row;
 
@@ -135,9 +126,11 @@ namespace deeprm {
           size_t sample_count = 0;
           error = pod5_get_read_complete_sample_count(reader, batch, row, &sample_count);
           if (error != POD5_OK) {
-            cerr << "Failed to get sample count for read " << meta.read_id
+            cerr << "Failed to get sample count for read " << uuid128_to_hex(meta.read_id)
                 << ": " << pod5_get_error_string() << endl;
-            continue;
+            pod5_free_read_batch(batch);
+            pod5_close_and_free_reader(reader);
+            return false;
           }
           meta.sample_count = sample_count;
 
@@ -148,8 +141,10 @@ namespace deeprm {
         pod5_free_read_batch(batch);
       }
 
-      // Note: We do NOT close the reader here as it's stored in metadata
-      // The reader should be closed when the metadata is no longer needed
+      // The scan reader is not referenced by the metadata (workers open
+      // their own); close it now so Arrow releases the file's footer and
+      // batch state instead of holding it until process exit.
+      pod5_close_and_free_reader(reader);
 
       return true;
     } catch (const exception& e) {
@@ -159,7 +154,38 @@ namespace deeprm {
     }
   }
 
-  bool Pod5Reader::read_pod5_record(const Pod5RecordMeta& meta,
+  Pod5BatchCache::~Pod5BatchCache()
+  {
+    release();
+  }
+
+  Pod5ReadRecordBatch_t* Pod5BatchCache::get(Pod5FileReader_t* reader, size_t batch_index)
+  {
+    if (batch_ && reader_ == reader && batch_index_ == batch_index)
+      return batch_;
+    release();
+    Pod5ReadRecordBatch_t* batch = nullptr;
+    if (pod5_get_read_batch(&batch, reader, batch_index) != POD5_OK) {
+      cerr << "Failed to get batch " << batch_index
+          << ": " << pod5_get_error_string() << endl;
+      return nullptr;
+    }
+    reader_ = reader;
+    batch_index_ = batch_index;
+    batch_ = batch;
+    return batch_;
+  }
+
+  void Pod5BatchCache::release()
+  {
+    if (batch_) {
+      pod5_free_read_batch(batch_);
+      batch_ = nullptr;
+    }
+    reader_ = nullptr;
+  }
+
+  bool Pod5Reader::read_pod5_record(const Pod5RecordMeta& meta, Pod5BatchCache& cache,
                                     vector<int16_t>& signal)
   {
     try {
@@ -168,42 +194,19 @@ namespace deeprm {
         return false;
       }
 
-      // Get batch
-      Pod5ReadRecordBatch_t* batch = nullptr;
-      pod5_error_t error = pod5_get_read_batch(&batch, meta.reader, meta.batch_index);
-      if (error != POD5_OK) {
-        cerr << "Failed to get batch " << meta.batch_index
-            << ": " << pod5_get_error_string() << endl;
+      // Only the batch is re-fetched per read; no row-info call is needed on this path.
+      Pod5ReadRecordBatch_t* batch = cache.get(meta.reader, meta.batch_index);
+      if (!batch)
         return false;
-      }
 
-      // Get read information for calibration
-      ReadBatchRowInfo_t row_info;
-      uint16_t read_table_version = 0;
-      error = pod5_get_read_batch_row_info_data(
-        batch, meta.row_index, READ_BATCH_ROW_INFO_VERSION, &row_info, &read_table_version);
-      if (error != POD5_OK) {
-        cerr << "Failed to get row info: " << pod5_get_error_string() << endl;
-        pod5_free_read_batch(batch);
-        return false;
-      }
-
-      // Resize signal vector
       signal.resize(meta.sample_count);
-
-      // Get complete signal data
-      error = pod5_get_read_complete_signal(
+      pod5_error_t error = pod5_get_read_complete_signal(
         meta.reader, batch, meta.row_index, meta.sample_count, signal.data());
       if (error != POD5_OK) {
-        cerr << "Failed to get signal for read " << meta.read_id
+        cerr << "Failed to get signal for read " << uuid128_to_hex(meta.read_id)
             << ": " << pod5_get_error_string() << endl;
-        pod5_free_read_batch(batch);
         return false;
       }
-
-      // Free batch memory
-      pod5_free_read_batch(batch);
-
       return true;
     } catch (const exception& e) {
       cerr << "Exception reading POD5 record: " << e.what() << endl;

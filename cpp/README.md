@@ -1,193 +1,82 @@
 # DeepRM Preprocessing (C++)
 
-Preprocesses Oxford Nanopore signal data and Dorado BAM reads prior to DeepRM ML inference
+The C++ preprocessing program that `deeprm call prep` runs. This page tells how to build it.
 
-## Features
+## Requirements
 
-1. Extract read_id, move tags, and quality information from BAM files
-2. Extract signal data and calibration information from POD5 files  
-3. Merge the two datasets by read_id
-4. Perform signal normalization and segmentation
-5. Save results to NPZ files in chunks
+- GCC 10 or newer (or Clang 12 or newer) with its static C++ library (`libstdc++.a`; on RHEL-based systems the
+  `libstdc++-static` package)
+- GNU binutils 2.36 or newer. Ubuntu 22.04 and Debian 12 have it; RHEL, Rocky and Alma 8 and 9 do not (use the
+  conda toolchain below).
+- cmake 3.18 or newer (`python -m pip install cmake` gives one without root)
+- autoconf, automake and make
+- zlib, bzip2 and liblzma, with their headers
 
-## Build Requirements
+htslib, cnpy, mimalloc and libdeflate are included in this folder and built with the program. The POD5 library is
+included as prebuilt static libraries (`pod5-file-format/`), so it is not built.
 
-### Required Libraries
+## Build
 
-1. **system packages**
-   - xz-devel
-   - zlib-devel
-   - bzip2-devel
-   - libcurl-devel
-   - libuuid-devel
-   - openssl-devel
- 
-2. **htslib**
-   - For reading BAM files
-   - Source info
-     - gerrit:29418/public/htslib, (branch: 1.22)
-   - Automatically cloned and built within the project
-   - Build output
-     - `./htslib/libhts.a`
+### 1. Get the source
 
-3. **cnpy**
-   - For generating NPZ files
-   - Source info
-     - https://github.com/rogersce/cnpy (branch: master)
-     - Commit: 4e8810b1a8637695171ed346ce68f6984e585ef4
-   - Automatically built within the project
-   - Build output
-     - `./cnpy/build/libcnpy.a`
-
-4. **pod5-file-format**
-   - For reading POD5 files
-   - Source info
-     - https://github.com/nanoporetech/pod5-file-format/tree/0.3.27
-   - Imported as prebuilt binary
-     - `./pod5-file-format/libpod5_format.a`
-     - `./pod5-file-format/libarrow.a`
-     - `./pod5-file-format/libjemalloc_pic.a`
-     - `./pod5-file-format/libzstd.a`
-
-### System Requirements
-
-- C++20 compatible compiler (GCC 10+ or Clang 12+)
-- autotools (for building htslib)
-- Standard development tools (make, pkg-config, etc.)
-
-## Build Instructions
-
-### 1. Build Project
+Use the source of the DeepRM version you run (`deeprm --version` shows it):
 
 ```bash
-# Full build (including htslib and cnpy)
-make
-
-# Or step-by-step build
-make clean      # Clean project files only
-make all        # Perform build
+git clone https://github.com/vadanamu/deeprm
+cd deeprm
+git checkout <the release tag of that version>
+cd cpp
 ```
 
-### 2. Cleanup
+### 2. Get the build tools
+
+On Ubuntu 22.04 or newer, or Debian 12 or newer:
 
 ```bash
-make clean      # Clean project files only
-make clean_all  # Clean everything including external libraries
+sudo apt-get install build-essential autoconf automake cmake zlib1g-dev libbz2-dev liblzma-dev
 ```
 
-## Usage
+On any other Linux, also without root, use conda-forge's compilers. Their glibc is 2.28, so the binary runs on any
+Linux with glibc 2.28 or newer:
 
 ```bash
-Usage: bin/deeprm_preprocess [OPTIONS]
-
-DeepRM Preprocessing - Segment and Normalize Signal
-
-Required arguments:
-  -p, --pod5 PATH          POD5 Input directory
-  -b, --bam PATH           Dorado BAM file (specifying '-' for stdin)
-  -o, --output PATH        Output directory
-
-Optional arguments:
-  -t, --thread NUM         Number of thread to use (default: 45)
-  -q, --qcut NUM           BQ cutoff (default: 0)
-  -k, --chunk NUM          Chunk size (default: 16000)
-  -z, --max-token-len NUM  Maximum token length (default: 200)
-  -s, --sampling NUM       Sampling rate (default: 6)
-  -y, --boi CHAR           Base of interest (default: A)
-  -e, --kmer-len NUM       k-mer length (default: 5)
-  -l, --cb-len NUM         Context block length (default: 21)
-  -a, --bam-thread NUM     BAM decompression thread per process (default: 4)
-  -n, --process-once NUM   Reads per processing batch (default: 1000)
-  -f, --dwell-shift NUM    Distance between motor and pore (default: 10)
-  -w, --sig-window NUM     Signal window size (default: 5)
-  -g, --filter-flag NUM    BAM flag bits to filter (default: 276)
-  -d, --label-div NUM      Label division factor (default: 1000000000)
-  -h, --help               Show this help message
-  -v, --version            Show version information
+conda create -y -p ./buildenv -c conda-forge --override-channels \
+  gcc_linux-64=13 gxx_linux-64=13 sysroot_linux-64=2.28 zlib bzip2 xz liblzma-static autoconf automake m4 make
+python -m pip install cmake    # if your cmake is older than 3.18
+export PATH=$PWD/buildenv/bin:$PATH CPATH=$PWD/buildenv/include LIBRARY_PATH=$PWD/buildenv/lib M4=$PWD/buildenv/bin/m4
+CONDA_CC="CC=x86_64-conda-linux-gnu-gcc CXX=x86_64-conda-linux-gnu-g++"
+# keep conda's library folder out of the binary's library search path
+SPECS=$(ls buildenv/lib/gcc/x86_64-conda-linux-gnu/*/specs)
+{ echo '*link_command:'; awk 'f && /^$/{exit} f{print} /^\*link_command:/{f=1}' "$SPECS" \
+    | sed "s#%{!static:-rpath $PWD/buildenv/lib}##"; echo; } > norpath.specs
 ```
 
-## Output File Format
-
-NPZ files follow this naming convention:
-- `{worker_id}-{processing_unit_id}-{chunk_id}.npz`
-- Last processing unit: `{worker_id}-last-{chunk_id}.npz`
-- Last chunk: `{worker_id}-last-last.npz`
-
-Each NPZ file contains the following arrays:
-- `segment_len_arr`: Segment length array
-- `signal_token`: Signal token
-- `kmer_token`: k-mer token
-- `dwell_motor_token`: Motor dwell token
-- `dwell_pore_token`: Pore dwell token
-- `bq_token`: Quality score token
-- `label_id`: Label ID
-- `read_id`: Read ID
-
-## Project Structure
-
-```
-deeprm_preprocess/
-├── src/
-│   ├── main.cpp              # Main application
-│   ├── args/                 # Argument parsing
-│   ├── sam/                  # BAM file reading
-│   ├── pod5/                 # POD5 file reading
-│   ├── merger/               # Record merging and processing
-│   ├── npz/                  # NPZ file generation
-│   └── utils/                # Utility functions
-├── htslib/                   # htslib source code
-├── cnpy/                     # cnpy library
-├── pod5-file-format/         # POD5 library
-├── Makefile                  # Build script
-└── README.md                 # This file
-```
-
-## References
-
-### Implementations
-
-1. **POD5 File Reading**
-   - **Uses actual pod5-file-format C API**
-   - Batch-based reading, read_id conversion
-   - Signal data and calibration information extraction
-
-2. **BAM File Reading**
-   - Extract move tags, quality scores, aligned pairs
-
-3. **Record Merging**
-   - read_id-based matching
-   - Context block extraction and token generation
-
-4. **Signal Processing**
-   - Performed by below functions:
-     - `move_to_dwell`
-     - `normalize_trim_segment_signal`
-     - `segmented_signal_to_block`
-
-5. **NPZ Output**
-   - Chunk-based saving
-   - All field saving (segment_len_arr, signal_token, etc.)
-
-6. **Multiprocessing**
-   - Parallel BAM file parsing
-   - Parallel POD5 file processing
-   - Independent output per worker
-
-### Performance and Memory
-
-- **Memory Efficiency**: Batch-based processing supports large files
-- **Multithreading**: Automatic scaling to match CPU core count
-- **Chunk-based Output**: Limited memory usage
-
-### Usage Examples
+### 3. Build
 
 ```bash
-# Piped input
-CMD_SAM_EMIT_STDOUT | ./deeprm_preprocess -p /path/to/pod5/folder -b - -o output/
+STATIC="Z_LIB=-l:libz.a BZ2_LIB=-l:libbz2.a LZMA_LIB=-l:liblzma.a"
+make -j 16 $STATIC                                                     # system tools
+make -j 16 $CONDA_CC $STATIC EXTRA_LDFLAGS=-specs=$PWD/norpath.specs   # conda toolchain
+```
 
-# File input
-./deeprm_preprocess -p /path/to/pod5/folder -b input.bam -o output/
+`$STATIC` links zlib, bzip2 and liblzma into the binary, so it needs only glibc where it runs. A plain `make -j 16`
+also works, but then those libraries must be installed wherever the binary runs. `make clean_all` removes all build
+output.
 
-# Custom settings
-./deeprm_preprocess -p /path/to/pod5/folder -b input.bam -o output/ -t 16 -k 16000 -z 250 -q 10
+## Test
+
+```bash
+make test-uuid $CONDA_CC       # the read-id parser
+make test-sam-end $CONDA_CC    # the check for a cut-off SAM input
+```
+
+With system tools, `$CONDA_CC` is empty.
+
+## Where the binary lands
+
+The build writes `bin/deeprm_preprocess`. `bin/deeprm_preprocess --version` checks that it runs. To use it with
+DeepRM:
+
+```bash
+export DEEPRM_PREPROCESS_BIN=$PWD/bin/deeprm_preprocess    # or: deeprm call prep --preprocess-bin <path> ...
 ```

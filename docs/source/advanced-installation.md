@@ -1,191 +1,77 @@
 # 📦 Advanced Installation
-## DeepRM Preprocessing (C++)
-Preprocesses Oxford Nanopore signal data and DORADO BAM reads prior to DeepRM ML inference
+Details that most users do not need. The basic install is on the {doc}`installation` page.
 
-## Features
+(supported-systems)=
+## Supported systems
+* Linux x86_64 with glibc 2.28 or newer (Ubuntu 20.04, Debian 10, RHEL, Rocky or Alma 8, or newer).
+  `ldd --version` shows your glibc.
+* Other systems are not supported or tested.
 
-1. Extract read_id, move tags, and quality information from BAM files
-2. Extract signal data and calibration information from POD5 files  
-3. Merge the two datasets by read_id
-4. Perform signal normalization and segmentation
-5. Save results to NPZ files in chunks
+(pytorch-builds)=
+## PyTorch builds
+`pip install deeprm` installs PyTorch 2.10.0 built for CUDA 12.8. It runs on NVIDIA GPUs from V100 to B200 and RTX 50
+(driver 525 or newer; 570 or newer for B200 and RTX 50), and on the CPU. In these cases, install another build:
 
-## Build Requirements
+* CUDA 13.0 build: optional, for newer GPUs (for example H100 or B200) with driver 580 or newer. It does not run on
+  V100 or older GPUs.
+  ```bash
+  pip install deeprm --extra-index-url https://download.pytorch.org/whl/cu130
+  uv pip install deeprm --torch-backend=cu130
+  ```
+* CUDA 12.6 build: for older GPUs (GTX 900, GTX 10, P100, P40).
+  ```bash
+  pip install deeprm --extra-index-url https://download.pytorch.org/whl/cu126
+  uv pip install deeprm --torch-backend=cu126
+  ```
+* CPU-only build: for a machine without a GPU (a much smaller download).
+  ```bash
+  pip install deeprm --extra-index-url https://download.pytorch.org/whl/cpu
+  uv pip install deeprm --torch-backend=cpu
+  ```
 
-### Required Libraries
+`nvidia-smi` shows your GPU and driver version. If the installed build does not fit your GPU, `deeprm check` says so
+and prints the command that installs the right build.
 
-1. **system packages**
-   - xz-devel
-   - zlib-devel
-   - bzip2-devel
-   - libcurl-devel
-   - libuuid-devel
-   - openssl-devel
- 
-2. **htslib**
-   - For reading BAM files
-   - Source info
-     - gerrit:29418/public/htslib, (branch: 1.22)
-   - Automatically cloned and built within the project
-   - Build output
-     - `./htslib/libhts.a`
+## uv
+* uv's own Python (`--python-preference only-managed`) has the C headers that the `fa4` and `fast` engines need. Some
+  system Pythons do not.
+* `--torch-backend` works only with `uv pip install`. In a uv project (`uv add deeprm torch`), choose the PyTorch
+  build in `pyproject.toml` as in [uv's PyTorch guide](https://docs.astral.sh/uv/guides/integration/pytorch/).
 
-3. **cnpy**
-   - For generating NPZ files
-   - Source info
-     - https://github.com/rogersce/cnpy (branch: master)
-     - Commit: 4e8810b1a8637695171ed346ce68f6984e585ef4
-   - Automatically built within the project
-   - Build output
-     - `./cnpy/build/libcnpy.a`
+(fa4-engine)=
+## FlashAttention-4
+* DeepRM installs FlashAttention-4 on Linux x86_64. It gives the fastest engine, `fa4`.
+* Where DeepRM uses `fa4`, and the warning when it does not: {ref}`inference-engines`.
 
-4. **pod5-file-format**
-   - For reading POD5 files
-   - Source info
-     - https://github.com/nanoporetech/pod5-file-format/tree/0.3.27
-   - Imported as prebuilt binary
-     - `./pod5-file-format/libpod5_format.a`
-     - `./pod5-file-format/libarrow.a`
-     - `./pod5-file-format/libjemalloc_pic.a`
-     - `./pod5-file-format/libzstd.a`
+(dorado-basecalling)=
+## Dorado
+* DeepRM v1.2 expects reads basecalled with Dorado 2.0.0 and the `rna004_sup@v6.0.0` model, with `--emit-moves`
+  and `--chunksize 12000`. Dorado 1.4.0 and older do not have this model.
+  * https://github.com/nanoporetech/dorado
+* For `deeprm call`, align the reads with `--reference`: the preprocessing needs the `MD` tag. The commands are in
+  {doc}`usage`.
 
-### System Requirements
+(prep-binary)=
+## The C++ preprocessing binary
+`deeprm call prep` runs `deeprm_preprocess`, a C++ program installed with DeepRM. It gives the same rows as the
+Python preprocessing, faster.
+* It needs Linux x86_64 with glibc 2.27 or newer. It needs no other system library.
+* If it cannot start, `deeprm call prep` uses the Python preprocessing instead:
+  {ref}`Troubleshooting <prep-troubleshooting>`.
+* `deeprm call prep` also uses the Python preprocessing when `--pod5` is a single file, or when you set an option
+  that only the Python preprocessing has. The log says which.
+* When the binary works, `deeprm check` prints `C++ preprocessing binary: starts (...)`.
 
-- C++20 compatible compiler (GCC 10+ or Clang 12+)
-- autotools (for building htslib)
-- Standard development tools (make, pkg-config, etc.)
-
-## Build Instructions
-
-### 1. Build Project
-
+(prep-binary-other-build)=
+### Use another build
 ```bash
-# Full build (including htslib and cnpy)
-make
-
-# Or step-by-step build
-make clean      # Clean project files only
-make all        # Perform build
+export DEEPRM_PREPROCESS_BIN=/path/to/deeprm_preprocess
+# or: deeprm call prep --preprocess-bin /path/to/deeprm_preprocess ...
 ```
+* If this binary cannot start, `deeprm call prep` stops with an error. It does not use the Python preprocessing.
+* Unset the variable, or drop the option, to go back to the bundled binary.
 
-### 2. Cleanup
-
-```bash
-make clean      # Clean project files only
-make clean_all  # Clean everything including external libraries
-```
-
-## Usage
-
-```bash
-Usage: bin/deeprm_preprocess [OPTIONS]
-
-DeepRM Preprocessing - Segment and Normalize Signal
-
-Required arguments:
-  -p, --pod5 PATH          POD5 Input directory
-  -b, --bam PATH           Dorado BAM file (specifying '-' for stdin)
-  -o, --output PATH        Output directory
-
-Optional arguments:
-  -t, --thread NUM         Number of thread to use (default: 45)
-  -q, --qcut NUM           BQ cutoff (default: 0)
-  -k, --chunk NUM          Chunk size (default: 16000)
-  -z, --max-token-len NUM  Maximum token length (default: 200)
-  -s, --sampling NUM       Sampling rate (default: 6)
-  -y, --boi CHAR           Base of interest (default: A)
-  -e, --kmer-len NUM       k-mer length (default: 5)
-  -l, --cb-len NUM         Context block length (default: 21)
-  -a, --bam-thread NUM     BAM decompression thread per process (default: 4)
-  -n, --process-once NUM   Reads per processing batch (default: 1000)
-  -f, --dwell-shift NUM    Distance between motor and pore (default: 10)
-  -w, --sig-window NUM     Signal window size (default: 5)
-  -g, --filter-flag NUM    BAM flag bits to filter (default: 276)
-  -d, --label-div NUM      Label division factor (default: 1000000000)
-  -h, --help               Show this help message
-  -v, --version            Show version information
-```
-
-## Output File Format
-
-NPZ files follow this naming convention:
-- `{worker_id}-{processing_unit_id}-{chunk_id}.npz`
-- Last processing unit: `{worker_id}-last-{chunk_id}.npz`
-- Last chunk: `{worker_id}-last-last.npz`
-
-Each NPZ file contains the following arrays:
-- `segment_len_arr`: Segment length array
-- `signal_token`: Signal token
-- `kmer_token`: k-mer token
-- `dwell_motor_token`: Motor dwell token
-- `dwell_pore_token`: Pore dwell token
-- `bq_token`: Quality score token
-- `label_id`: Label ID
-- `read_id`: Read ID
-
-## Project Structure
-
-```
-deeprm_preprocess/
-├── src/
-│   ├── main.cpp              # Main application
-│   ├── args/                 # Argument parsing
-│   ├── sam/                  # BAM file reading
-│   ├── pod5/                 # POD5 file reading
-│   ├── merger/               # Record merging and processing
-│   ├── npz/                  # NPZ file generation
-│   └── utils/                # Utility functions
-├── htslib/                   # htslib source code
-├── cnpy/                     # cnpy library
-├── pod5-file-format/         # POD5 library
-├── Makefile                  # Build script
-└── README.md                 # This file
-```
-
-### Features summary
-
-1. **POD5 File Reading**
-   - **Uses actual pod5-file-format C API**
-   - Batch-based reading, read_id conversion
-   - Signal data and calibration information extraction
-
-2. **BAM File Reading**
-   - Extract move tags, quality scores, aligned pairs
-
-3. **Record Merging**
-   - read_id-based matching
-   - Context block extraction and token generation
-
-4. **Signal Processing**
-   - Performed by below functions:
-     - `move_to_dwell`
-     - `normalize_trim_segment_signal`
-     - `segmented_signal_to_block`
-
-5. **NPZ Output**
-   - Chunk-based saving
-   - All field saving (segment_len_arr, signal_token, etc.)
-
-6. **Multiprocessing**
-   - Parallel BAM file parsing
-   - Parallel POD5 file processing
-   - Independent output per worker
-
-### Performance and Memory
-
-- **Memory Efficiency**: Batch-based processing supports large files
-- **Multithreading**: Automatic scaling to match CPU core count
-- **Chunk-based Output**: Limited memory usage
-
-### Usage Examples
-
-```bash
-# Piped input
-CMD_SAM_EMIT_STDOUT | ./deeprm_preprocess -p /path/to/pod5/folder -b - -o output/
-
-# File input
-./deeprm_preprocess -p /path/to/pod5/folder -b input.bam -o output/
-
-# Custom settings
-./deeprm_preprocess -p /path/to/pod5/folder -b input.bam -o output/ -t 16 -k 16000 -z 250 -q 10
-```
+(prep-binary-build)=
+### Build the binary
+The build steps are in [`cpp/README.md`](https://github.com/vadanamu/DeepRM/blob/public/cpp/README.md) in the source
+code.

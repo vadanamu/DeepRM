@@ -1,6 +1,6 @@
 /***************************************************************************************************
  *
- * Copyright (C) 2025 Genome4me Incorporated - All Rights Reserved.
+ * Copyright (C) 2025-2026 Genome4me Incorporated - All Rights Reserved.
  *
  * This software, including its source code, embedded concepts, and associated
  * documentation, is proprietary to Genome4me Incorporated and is protected
@@ -15,27 +15,17 @@
 
 #pragma once
 
-#include "../bam/BamReader.h"
-#include "../pod5/Pod5Reader.h"
-
-#include "../utils/Utils.h"
-#include <vector>
 #include <memory>
+#include <vector>
+
+#include "bam/BamReader.h"
+#include "npz/NpzWriter.h"
+#include "pod5/Pod5Reader.h"
+#include "utils/Utils.h"
 
 using namespace std;
 
 namespace deeprm {
-  struct ProcessedRecord {
-    string read_id;
-    vector<uint16_t> segment_len_arr;
-    vector<double> signal_token;
-    vector<uint8_t> kmer_token;
-    vector<float> dwell_motor_token;
-    vector<float> dwell_pore_token;
-    vector<uint8_t> bq_token;
-    int64_t label_id;
-  };
-
   class RecordMerger {
   private:
     NormalizationFactors norm_factors;
@@ -46,22 +36,29 @@ namespace deeprm {
     int dwell_shift;
     int sig_window;
     uint64_t label_div;
-
-    vector<BamRecord> bam_records;
-    vector<Pod5RecordMeta> pod5_meta_records;
+    // Site handling, as in the Python preprocessing: 0 = drop out-of-bounds contexts (none, default),
+    // 1 = zero padding, 2 = edge padding. Trim bounds come from BamRecord.
+    int pad_mode;
+    bool use_trimming;
 
   public:
     RecordMerger(const NormalizationFactors& nf, int cb_len, int kmer_len,
                  int max_token_len, int sampling, int dwell_shift, int sig_window,
-                 uint64_t label_div);
+                 uint64_t label_div, const string& padding_mode, bool use_trimming);
 
+    // Stateless past construction: it holds tokenization settings, never
+    // records. Each accepted site is written straight into the writer's
+    // preallocated row (acquire_row / commit_row) -- no per-record object is
+    // created, and nothing accumulates outside the writer's fixed chunk
+    // arrays (the per-site signal block is a transient). Both execution modes call this,
+    // which is what keeps their memory behaviour identical for the same
+    // options.
+    //
+    // Returns false when the read's POD5 signal could not be read. That
+    // is a run failure for the caller to report.
     bool process_merged_record_with_meta(const BamRecord& bam_rec,
                                          const Pod5RecordMeta& pod5_meta,
-                                         vector<ProcessedRecord>& output) const;
-
-    void add_bam_records(vector<BamRecord>&& records);
-    void add_pod5_meta_records(vector<Pod5RecordMeta>&& meta_records);
-    vector<ProcessedRecord> merge_and_process_with_meta();
-    void clear();
+                                         Pod5BatchCache& batch_cache,
+                                         NpzWriter& writer) const;
   };
 } // namespace deeprm

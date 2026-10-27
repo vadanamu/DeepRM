@@ -1,15 +1,16 @@
 # pyproject.toml at repo root
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "deeprm"
-version = "1.1.3"
+version = "1.2"
 description = "DeepRM: Deep Learning for RNA Modification Detection using Nanopore Direct RNA Sequencing"
 readme = "README.md"
-requires-python = ">=3.9"
-license = {text = "MIT"}
+requires-python = ">=3.10"
+license = "CC-BY-NC-SA-4.0"
+license-files = ["LICENSE.md"]
 authors = [{name = "Laboratory of Computational Biology, Seoul National University"}]
 keywords = ["RNA", "RNA modification", "m6A", "nanopore", "bioinformatics", "deep learning"]
 
@@ -17,7 +18,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.9",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
@@ -26,22 +26,43 @@ classifiers = [
   "Intended Audience :: Science/Research",
 ]
 
+# The lowest versions below are the lowest that install AND import together with numpy 2 (older pandas, pod5,
+# matplotlib, seaborn and tensorboard releases accept numpy 2 in their metadata but fail on it).
+# torch==2.10.0, the version DeepRM v1.2 was verified with. On Linux x86_64 PyPI's 2.10.0 is the CUDA 12.8 build: it has
+# code for V100 to B200 and RTX 50 and runs with driver 525 or newer (570 for B200 and RTX 50). The same version from
+# download.pytorch.org (cu130, cu126, cpu) also satisfies the pin; the README says when to choose one.
+# FlashAttention-4 (the fa4 engine) on Linux x86_64: the versions the v1.2 model was verified with, in the cu13 form,
+# which installs CUTLASS's CUDA 12 and CUDA 13 libraries; CUTLASS loads the one the driver supports. These lines must
+# match FA4_REQUIREMENTS in src/deeprm/model/deeprm_v12_engines.py (a test checks it).
 dependencies = [
-    "colorama",
     "tqdm",
     "psutil",
+    "biopython>=1.81",  # pairwise alignment in the training-data context-block extractor (deeprm train prep)
+    "pyarrow>=16",  # the BAM table that deeprm train prep shares between its processes; the pileup's BED writer
     "networkx>=3.1",
     "numpy>=2.0,<3.0",
-    "pandas>=2.0,<3.0",
+    "scipy>=1.13",  # the confidence bounds of the stoichiometry site rule (deeprm call pileup)
+    "pandas>=2.2.2,<3.0",
     "polyleven>=0.8",
-    "pod5>=0.3.2",
+    "pod5>=0.3.11",
     "pysam>=0.22.0",
-    "matplotlib>=3.7",
-    "seaborn>=0.12",
-    "tensorboard>=2.0",
+    "matplotlib>=3.8.4",
+    "seaborn>=0.12.2",
+    "tensorboard>=2.11.2",
+    "torch==2.10.0",
+    'flash-attn-4[cu13]==4.0.0b35; platform_system == "Linux" and platform_machine == "x86_64"',
+    'nvidia-cutlass-dsl[cu13]==4.8.0; platform_system == "Linux" and platform_machine == "x86_64"',
+    'quack-kernels==0.6.5; platform_system == "Linux" and platform_machine == "x86_64"',
+    'apache-tvm-ffi==0.1.14.post1; platform_system == "Linux" and platform_machine == "x86_64"',
+    'torch-c-dlpack-ext==0.1.5; platform_system == "Linux" and platform_machine == "x86_64"',
+    'einops==0.8.2; platform_system == "Linux" and platform_machine == "x86_64"',
 ]
 
 [project.optional-dependencies]
+# Training (deeprm train): the Binary* metrics of torchmetrics 1.0 or newer.
+train = [
+    "torchmetrics>=1.0",
+]
 docs = [
     "sphinx>=7,<8",
     "furo",
@@ -70,8 +91,10 @@ Homepage = "https://github.com/vadanamu/deeprm"
 Documentation = "https://deeprm.readthedocs.io/"
 Source = "https://github.com/vadanamu/deeprm"
 
+# The C++ preprocessing binary and the bundled weights, so that the wheel holds them whatever MANIFEST.in says.
 [tool.setuptools.package-data]
-"deeprm" = []
+"deeprm.inference" = ["deeprm_preprocess"]
+"deeprm.weight" = ["*.pt"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -84,7 +107,7 @@ include = ["deeprm*"]
 
 [tool.black]
 line-length = 120
-target-version = ["py39", "py310", "py311", "py312"]
+target-version = ["py310", "py311", "py312"]
 
 [tool.isort]
 profile = "black"
@@ -92,9 +115,16 @@ line_length = 120
 
 [tool.ruff]
 line-length = 120
+fix = true
+
+[tool.ruff.lint]
 select = ["E","F","I","UP"]
 ignore = ["UP035","UP006","E402"]
-fix = true
+
+[tool.ruff.lint.per-file-ignores]
+# Research code copied unchanged (integrated_prep_v4.py, dag_extract_block_v4.py); kept as written for traceability.
+"src/deeprm/train/train_preprocess.py" = ["E401", "E501", "I001", "UP015", "UP031"]
+"src/deeprm/train/extract_block.py" = ["E501", "F401", "I001", "UP045"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

@@ -10,7 +10,7 @@
 
 ## Submodules
 
-### `deeprm.utils.utils`
+### `utils.utils`
 
 ```{eval-rst}
 .. automodule:: deeprm.utils.utils
@@ -19,7 +19,7 @@
     :show-inheritance:
 ```
 
-### `deeprm.utils.logging`
+### `utils.logging`
 
 ```{eval-rst}
 .. automodule:: deeprm.utils.logging
@@ -28,27 +28,7 @@
     :show-inheritance:
 ```
 
-### `deeprm.utils.memory`
-
-```{eval-rst}
-.. automodule:: deeprm.utils.memory
-    :members:
-    :undoc-members:
-    :show-inheritance:
-```
-
-
-### `deeprm.utils.activations`
-
-```{eval-rst}
-.. automodule:: deeprm.utils.activations
-    :members:
-    :undoc-members:
-    :show-inheritance:
-```
-
-
-### `deeprm.utils.check_deps`
+### `utils.check_deps`
 
 ```{eval-rst}
 .. automodule:: deeprm.utils.check_deps
@@ -58,10 +38,20 @@
 ```
 
 
-### `deeprm.utils.check_installation`
+### `utils.check_installation`
 
 ```{eval-rst}
 .. automodule:: deeprm.utils.check_installation
+    :members:
+    :undoc-members:
+    :show-inheritance:
+```
+
+
+### `utils.prep_binary`
+
+```{eval-rst}
+.. automodule:: deeprm.utils.prep_binary
     :members:
     :undoc-members:
     :show-inheritance:
