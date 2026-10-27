@@ -41,9 +41,8 @@ pip install deeprm
 deeprm check
 ```
 * `deeprm check` reports any problem it finds, with the command that fixes it.
-* With uv: `uv pip install deeprm "flash-attn-4[cu13]==4.0.0b35"`. DeepRM v1.2 needs FlashAttention-4 version
-  4.0.0b35, a pre-release (test) version, and uv installs it only when the command names this version; without it,
-  uv installs DeepRM v1.1.3.
+* With uv 0.12 or newer: `uv pip install deeprm`. An older uv installs DeepRM v1.1.3 instead. Update uv, or name
+  FlashAttention-4 in the command: `uv pip install deeprm "flash-attn-4[cu13]==4.0.0b35"`.
 * Other setups: see [Installation](#-installation).
 
 ## Table of Contents
@@ -87,10 +86,10 @@ deeprm check
 2. With uv, using uv's own Python (it has the C headers needed to compile the model):
 ```bash
 uv venv --python 3.12 --python-preference only-managed deeprm-env && source deeprm-env/bin/activate
-uv pip install deeprm "flash-attn-4[cu13]==4.0.0b35"
+uv pip install deeprm
 ```
-* Keep the FlashAttention-4 version in the command (see [Quick installation](#-quick-installation)). If deeprm-env
-  already holds an older DeepRM, add `-U` (upgrade).
+* This needs uv 0.12 or newer (`uv --version`; for an older uv see [Quick installation](#-quick-installation)). If
+  deeprm-env already holds an older DeepRM, add `-U` (upgrade).
 
 3. From source:
 ```bash
