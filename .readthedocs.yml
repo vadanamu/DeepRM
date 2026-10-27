@@ -8,6 +8,8 @@ build:
       # the example data (about 1.5 GB) is not used by the docs; removing it keeps the build within the disk limit
       - rm -rf example
     pre_install:
+      # the build image seeds pip 23.1, which rejects the typing-extensions 4.16.0 wheel; upgrade pip first, as CI does
+      - python -m pip install --upgrade pip
       # torch is a dependency of DeepRM; the CPU build is enough for the docs and avoids a ~3 GB CUDA download
       - python -m pip install "torch==2.10.0" --index-url https://download.pytorch.org/whl/cpu
 python:
