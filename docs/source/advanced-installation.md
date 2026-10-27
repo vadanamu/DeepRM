@@ -16,27 +16,37 @@ Details that most users do not need. The basic install is on the {doc}`installat
   V100 or older GPUs.
   ```bash
   pip install deeprm --extra-index-url https://download.pytorch.org/whl/cu130
-  uv pip install deeprm --torch-backend=cu130
+  uv pip install deeprm "flash-attn-4[cu13]==4.0.0b35" --torch-backend=cu130
   ```
 * CUDA 12.6 build: for older GPUs (GTX 900, GTX 10, P100, P40).
   ```bash
   pip install deeprm --extra-index-url https://download.pytorch.org/whl/cu126
-  uv pip install deeprm --torch-backend=cu126
+  uv pip install deeprm "flash-attn-4[cu13]==4.0.0b35" --torch-backend=cu126
   ```
 * CPU-only build: for a machine without a GPU (a much smaller download).
   ```bash
   pip install deeprm --extra-index-url https://download.pytorch.org/whl/cpu
-  uv pip install deeprm --torch-backend=cpu
+  uv pip install deeprm "flash-attn-4[cu13]==4.0.0b35" --torch-backend=cpu
   ```
 
 `nvidia-smi` shows your GPU and driver version. If the installed build does not fit your GPU, `deeprm check` says so
 and prints the command that installs the right build.
 
+(uv-prerelease)=
 ## uv
+* When you install DeepRM with uv on Linux x86_64, name FlashAttention-4 with its version:
+  `uv pip install deeprm "flash-attn-4[cu13]==4.0.0b35"`. DeepRM v1.2 depends on FlashAttention-4 version 4.0.0b35,
+  a pre-release (test) version. pip installs it. uv installs a pre-release only when the command, or the project's
+  own dependencies, name it with its version; otherwise uv picks DeepRM v1.1.3, the newest version without that
+  dependency, with no error. `uv pip install -e .` from source does not need it.
+* If the environment already has an older DeepRM (for example v1.1.3, from uv or pip), add `-U` (upgrade); without
+  it, uv keeps the old version: `uv pip install -U deeprm "flash-attn-4[cu13]==4.0.0b35"`. Add your `--torch-backend`
+  option if you used one.
 * uv's own Python (`--python-preference only-managed`) has the C headers that the `fa4` and `fast` engines need. Some
   system Pythons do not.
-* `--torch-backend` works only with `uv pip install`. In a uv project (`uv add deeprm torch`), choose the PyTorch
-  build in `pyproject.toml` as in [uv's PyTorch guide](https://docs.astral.sh/uv/guides/integration/pytorch/).
+* `--torch-backend` works only with `uv pip install`. In a uv project
+  (`uv add deeprm torch "flash-attn-4[cu13]==4.0.0b35"`), choose the PyTorch build in `pyproject.toml` as in
+  [uv's PyTorch guide](https://docs.astral.sh/uv/guides/integration/pytorch/).
 
 (fa4-engine)=
 ## FlashAttention-4

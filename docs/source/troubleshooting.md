@@ -2,6 +2,8 @@
 Run `deeprm check` first. It names most problems and prints the command that fixes them.
 
 ## Installation and GPU
+* **uv installs DeepRM v1.1.3 instead of v1.2.** Name FlashAttention-4 with its version, and add `-U` to replace
+  v1.1.3: `uv pip install -U deeprm "flash-attn-4[cu13]==4.0.0b35"` ({ref}`why <uv-prerelease>`).
 * **DeepRM runs on the CPU, or stops with "no kernel image is available".** Run `deeprm check` and run the command
   it prints: it installs a PyTorch build for your GPU and driver. If `nvidia-smi` fails after a driver update,
   restart the machine.
@@ -79,7 +81,7 @@ The log line and the `PREP_BINARY_CANNOT_START` warning of `deeprm check` give t
 
 ## Training (`deeprm train`)
 * **No training metrics, or "torchmetrics is not importable".** Install the training extra:
-  `pip install "deeprm[train]"` (with uv: `uv pip install "deeprm[train]"`).
+  `pip install "deeprm[train]"` (with uv: `uv pip install "deeprm[train]" "flash-attn-4[cu13]==4.0.0b35"`).
 * **Training runs out of memory.** Lower `--batch` (default 1024).
 * **`deeprm train compile` says "No files were written for ...".** The input is small for the chunk size. Remove the
   output folder and run again with a smaller `-c` (for example `-c 1000`).

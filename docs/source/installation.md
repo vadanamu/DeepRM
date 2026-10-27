@@ -9,7 +9,7 @@ deeprm check
 ```
 * This installs DeepRM v1.2 with PyTorch 2.10.0 and FlashAttention-4. What `deeprm check` prints: see
   Verify Installation below.
-* With uv: `uv pip install deeprm`.
+* With uv: `uv pip install deeprm "flash-attn-4[cu13]==4.0.0b35"` ({ref}`why <uv-prerelease>`).
 * For an older GPU, a machine without a GPU or another PyTorch build: {ref}`pytorch-builds`.
 
 ## Prerequisites
@@ -26,9 +26,10 @@ Install DeepRM in its own environment. It needs PyTorch 2.10.0 and replaces any 
 2. With uv, in a new environment with uv's own Python:
    ```bash
    uv venv --python 3.12 --python-preference only-managed deeprm-env && source deeprm-env/bin/activate
-   uv pip install deeprm
+   uv pip install deeprm "flash-attn-4[cu13]==4.0.0b35"
    ```
-   To install uv, see [uv's installation page](https://docs.astral.sh/uv/getting-started/installation/).
+   Keep the FlashAttention-4 version in the command ({ref}`why <uv-prerelease>`). To install uv, see
+   [uv's installation page](https://docs.astral.sh/uv/getting-started/installation/).
 3. From source:
    ```bash
    git clone https://github.com/vadanamu/deeprm
@@ -38,7 +39,7 @@ Install DeepRM in its own environment. It needs PyTorch 2.10.0 and replaces any 
 
 For training, also install the `train` extra:
 ```bash
-pip install "deeprm[train]"    # with uv: uv pip install "deeprm[train]"
+pip install "deeprm[train]"    # with uv: uv pip install "deeprm[train]" "flash-attn-4[cu13]==4.0.0b35"
 ```
 
 ## Verify Installation
