@@ -8,7 +8,7 @@ Deep learning for RNA Modification
 ![GitHub code size in bytes](https://img.shields.io/github/languages/code-size/vadanamu/DeepRM)
 ![GitHub contributors](https://img.shields.io/github/contributors/vadanamu/DeepRM)
 ![GitHub language count](https://img.shields.io/github/languages/count/vadanamu/DeepRM)
-![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17636697.svg)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17577861.svg)](https://doi.org/10.5281/zenodo.17577861)
 
 ```{toctree}
 :maxdepth: 1
