@@ -1,8 +1,8 @@
 # `deeprm check`
 
-Checks the DeepRM installation: PyTorch, torchmetrics, the GPU and the C++ preprocessing binary. It prints the
-problems it finds, then the engine `deeprm call run` would use on this machine and whether the preprocessing binary
-starts. It exits with status 1 if it found an error.
+Checks the DeepRM installation: PyTorch, torchmetrics, the GPU and the C++ preprocessing and pileup binaries. It
+prints the problems it finds, then the engine `deeprm call run` would use on this machine and whether the two binaries
+start. It exits with status 1 if it found an error.
 
 ## Usage
 

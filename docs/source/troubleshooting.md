@@ -2,7 +2,7 @@
 Run `deeprm check` first. It names most problems and prints the command that fixes them.
 
 ## Installation and GPU
-* **uv installs DeepRM v1.1.3 instead of v1.2.** Most often your uv is older than 0.12 (`uv --version`), or the
+* **uv installs DeepRM v1.1.3 instead of v1.2.1.** Most often your uv is older than 0.12 (`uv --version`), or the
   environment already held v1.1.3. Update uv and run `uv pip install -U deeprm`, or keep your uv and run
   `uv pip install -U deeprm "flash-attn-4[cu13]==4.0.0b35"` ({ref}`more <uv-prerelease>`).
 * **DeepRM runs on the CPU, or stops with "no kernel image is available".** Run `deeprm check` and run the command
@@ -38,9 +38,10 @@ Run `deeprm check` first. It names most problems and prints the command that fix
 
 (binary-not-starting)=
 ### The binary does not start
-The log line and the `PREP_BINARY_CANNOT_START` warning of `deeprm check` give the reason.
+The log line and the `PREP_BINARY_CANNOT_START` (or `PILEUP_BINARY_CANNOT_START`) warning of `deeprm check` give the
+reason. The same fixes apply to the preprocessing binary and to the pileup binary.
 * **On a file system where programs cannot run (noexec):** copy the binary to a folder where programs can run and
-  set `DEEPRM_PREPROCESS_BIN` to the copy.
+  set `DEEPRM_PREPROCESS_BIN` (or `DEEPRM_PILEUP_BIN`) to the copy.
 * **No execute permission:** run `chmod +x` on the file.
 * **glibc is older than the binary needs:** use a system or container with a newer glibc, or build the binary on this
   system ({ref}`prep-binary-build`).
@@ -48,7 +49,22 @@ The log line and the `PREP_BINARY_CANNOT_START` warning of `deeprm check` give t
 * **A system library cannot be loaded:** install the library the message names, or rebuild the binary with the static
   flags ({ref}`prep-binary-build`).
 * **The file is missing or incomplete:** reinstall DeepRM.
-* **Another CPU type or operating system, or "Illegal instruction":** nothing to fix; the Python preprocessing runs.
+* **Another CPU type or operating system, "Illegal instruction", or a CPU without AVX2 and FMA (pileup binary):**
+  nothing to fix; the Python code runs.
+
+## Pileup (`deeprm call pileup`)
+* **The log says "Falling back to the Python pileup".** The C++ pileup binary cannot start here. The run still
+  works, more slowly, with the same results. Fixes: {ref}`binary-not-starting`.
+* **The log says "Using the Python pileup: NumPy here does not compute ... as the pileup binary does".** On this
+  system (for example a CPU without AVX512) the binary's results would differ from the Python pileup's in the last
+  digits, so the Python pileup runs. Nothing to fix; the results are the same, the pileup is slower.
+* **The log says "Using the Python pileup: the binary does not give its results with --threshold".** Only the
+  default `--threshold` (0.98) runs in the binary.
+* **The log says "The pileup binary failed ...; running the Python pileup instead".** The binary stopped on this
+  input; its partial outputs were removed. The Python pileup runs and, if the input is bad, stops with its own
+  message.
+* **The pileup runs out of disk space.** The modBAM's temporary files go to the output folder. Use `--tmp-dir` to put
+  them on another disk, or `--skip-modbam` if you do not need the modBAM.
 
 ## Inference (`deeprm call run`)
 * **The GPU runs out of memory.** DeepRM splits the batch and says so. To avoid this, lower `--batch` (`-s`, default

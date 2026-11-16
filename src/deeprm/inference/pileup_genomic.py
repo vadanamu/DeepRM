@@ -8,6 +8,7 @@ This module provides:
   returning `np.nan` for out-of-bounds inputs.
 * `parse_refflat`: A helper to parse RefFlat/RefGene/GenePred annotations into a
   normalized DataFrame.
+* `GenomeMap`: The same mapping by reference index, for a site table that is mapped in parts.
 * `pileup_genomic`: A high-level function that adds up per-site sums per
   (chrom, strand, pos). It maps all sites of all transcripts in one vectorized pass
   (the same mapping as `TranscriptMapper`). The scores are computed from these sums
@@ -325,6 +326,106 @@ def _annotation_rows(names, annotation_index):
     return rows, n_exact, n_unversioned
 
 
+def _log_matches(transcripts, rows, n_exact, n_unversioned):
+    """Logs how many of `transcripts` were found in the annotation (`rows`, `n_exact` and `n_unversioned`: the
+    output of _annotation_rows for them)."""
+    n_missing = int((rows < 0).sum())
+    example = f", for example {transcripts[np.flatnonzero(rows < 0)[0]]}" if n_missing else ""
+    # a warning when sites are left out, so that a mismatched annotation does not go unnoticed
+    log.log(
+        logging.WARNING if n_missing else logging.INFO,
+        f"Genomic pileup: {n_exact} of {len(transcripts)} transcripts matched the annotation by name, "
+        f"{n_unversioned} after removing the version, {n_missing} not found{example} (their sites are left out).",
+    )
+    if n_unversioned:
+        log.warning(
+            f"{n_unversioned} transcripts matched the annotation only without their version; where the two "
+            "versions have different exons, their genomic positions follow the annotation's version."
+        )
+
+
+def _exon_layout(annotated):
+    """The exons of the transcripts `annotated` (rows of parse_refflat's output) laid end to end in transcript order
+    (reversed for '-').
+
+    Returns:
+        tuple: (True per '+' transcript, length per transcript, start of each transcript in the laid-out
+        coordinates, start of each exon in the same coordinates, genomic start and end per exon).
+    """
+    plus = annotated["strand"].to_numpy() == "+"
+    starts = annotated["exonStarts"].tolist()
+    ends = annotated["exonEnds"].tolist()
+    n_exons = np.array([len(x) for x in starts], dtype=np.int64)
+    first = np.cumsum(n_exons) - n_exons
+    within = np.arange(n_exons.sum()) - np.repeat(first, n_exons)
+    exon_plus = np.repeat(plus, n_exons)
+    order = np.where(exon_plus, np.repeat(first, n_exons) + within, np.repeat(first + n_exons - 1, n_exons) - within)
+    exon_start = np.concatenate(starts).astype(np.int64)[order]
+    exon_end = np.concatenate(ends).astype(np.int64)[order]
+    exon_len = exon_end - exon_start
+    tx_len = np.add.reduceat(exon_len, first)
+    tx_offset = np.cumsum(tx_len) - tx_len
+    exon_offset = np.cumsum(exon_len) - exon_len
+    return plus, tx_len, tx_offset, exon_offset, exon_start, exon_end
+
+
+class GenomeMap:
+    """`_map_to_genome` for the references of a BAM header, by reference index: the transcripts are found in the
+    annotation once, so that parts of a site table can be mapped apart from each other.
+
+    Attributes:
+        chroms (numpy.ndarray): The chromosomes of the annotated references, sorted (the order pileup_genomic's
+            table has them in); `map` returns indices into it.
+    """
+
+    def __init__(self, ref_names, refflat_df):
+        self._names = np.asarray(ref_names, dtype=object)
+        self._index = refflat_df.index
+        rows, _, _ = _annotation_rows(self._names, self._index)
+        present = np.flatnonzero(rows >= 0)
+        self._tx = np.full(len(self._names), -1, dtype=np.int64)  # reference index -> annotated transcript
+        self._tx[present] = np.arange(len(present))
+        self.chroms = np.empty(0, dtype=object)
+        if present.size:
+            annotated = refflat_df.iloc[rows[present]]
+            layout = _exon_layout(annotated)
+            self._plus, self._tx_len, self._tx_offset, self._exon_offset, self._exon_start, self._exon_end = layout
+            self._chrom, self.chroms = pd.factorize(annotated["chrom"].to_numpy(), sort=True)
+
+    def log_matches(self, ref_ids):
+        """Logs the match of the references `ref_ids` (in the order their sites come in the site table) with the
+        annotation, as _map_to_genome does for the transcripts of a table."""
+        transcripts = pd.unique(self._names[ref_ids])
+        _log_matches(transcripts, *_annotation_rows(transcripts, self._index))
+
+    def map(self, ref_ids, positions, opposite):
+        """Genomic positions of transcript sites.
+
+        Args:
+            ref_ids (numpy.ndarray): Reference index per site.
+            positions (numpy.ndarray): 0-based transcript position per site.
+            opposite (numpy.ndarray): True for a site on the strand opposite the transcript.
+
+        Returns:
+            tuple: (indices of the sites that map, index of their chromosome in `chroms`, True where the genomic
+            strand is '-', their 0-based genomic position).
+        """
+        if len(self.chroms) == 0:  # no reference is in the annotation
+            empty = np.empty(0, dtype=np.int64)
+            return empty, empty, np.empty(0, dtype=bool), empty
+        tx = self._tx[ref_ids]
+        inside = tx >= 0
+        inside[inside] = (positions[inside] >= 0) & (positions[inside] < self._tx_len[tx[inside]])
+        sites = np.flatnonzero(inside)
+        tx = tx[sites]
+        laid_out = self._tx_offset[tx] + positions[sites]
+        exon = np.searchsorted(self._exon_offset, laid_out, side="right") - 1
+        offset = laid_out - self._exon_offset[exon]
+        plus = self._plus[tx]
+        genomic = np.where(plus, self._exon_start[exon] + offset, self._exon_end[exon] - offset - 1)
+        return sites, self._chrom[tx], plus == opposite[sites], genomic
+
+
 def _map_to_genome(names, positions, refflat_df):
     """Genomic positions of transcript sites; `TranscriptMapper` for all transcripts at once.
 
@@ -341,39 +442,14 @@ def _map_to_genome(names, positions, refflat_df):
     """
     codes, transcripts = pd.factorize(names, sort=False)
     rows, n_exact, n_unversioned = _annotation_rows(np.asarray(transcripts, dtype=object), refflat_df.index)
-    n_missing = int((rows < 0).sum())
-    example = f", for example {transcripts[np.flatnonzero(rows < 0)[0]]}" if n_missing else ""
-    # a warning when sites are left out, so that a mismatched annotation does not go unnoticed
-    log.log(
-        logging.WARNING if n_missing else logging.INFO,
-        f"Genomic pileup: {n_exact} of {len(transcripts)} transcripts matched the annotation by name, "
-        f"{n_unversioned} after removing the version, {n_missing} not found{example} (their sites are left out).",
-    )
-    if n_unversioned:
-        log.warning(
-            f"{n_unversioned} transcripts matched the annotation only without their version; where the two "
-            "versions have different exons, their genomic positions follow the annotation's version."
-        )
+    _log_matches(transcripts, rows, n_exact, n_unversioned)
     present = np.flatnonzero(rows >= 0)
     if present.size == 0:
         empty = np.empty(0, dtype=np.int64)
         return empty, np.empty(0, dtype=object), np.empty(0, dtype=object), empty
 
     annotated = refflat_df.iloc[rows[present]]
-    plus = annotated["strand"].to_numpy() == "+"
-    starts = annotated["exonStarts"].tolist()
-    ends = annotated["exonEnds"].tolist()
-    n_exons = np.array([len(x) for x in starts], dtype=np.int64)
-    first = np.cumsum(n_exons) - n_exons
-    within = np.arange(n_exons.sum()) - np.repeat(first, n_exons)
-    exon_plus = np.repeat(plus, n_exons)
-    order = np.where(exon_plus, np.repeat(first, n_exons) + within, np.repeat(first + n_exons - 1, n_exons) - within)
-    exon_start = np.concatenate(starts).astype(np.int64)[order]
-    exon_end = np.concatenate(ends).astype(np.int64)[order]
-    exon_len = exon_end - exon_start
-    tx_len = np.add.reduceat(exon_len, first)
-    tx_offset = np.cumsum(tx_len) - tx_len  # start of each transcript in the laid-out coordinates
-    exon_offset = np.cumsum(exon_len) - exon_len  # start of each exon in the same coordinates
+    plus, tx_len, tx_offset, exon_offset, exon_start, exon_end = _exon_layout(annotated)
 
     tx_of_site = np.full(len(transcripts), -1, dtype=np.int64)
     tx_of_site[present] = np.arange(len(present))

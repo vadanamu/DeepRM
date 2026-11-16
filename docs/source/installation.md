@@ -7,7 +7,7 @@ In a new Python environment (Python 3.10 or newer) on Linux x86_64:
 pip install deeprm
 deeprm check
 ```
-* This installs DeepRM v1.2 with PyTorch 2.10.0 and FlashAttention-4. What `deeprm check` prints: see
+* This installs DeepRM v1.2.1 with PyTorch 2.10.0 and FlashAttention-4. What `deeprm check` prints: see
   Verify Installation below.
 * With uv 0.12 or newer: `uv pip install deeprm` ({ref}`older uv <uv-prerelease>`).
 * For an older GPU, a machine without a GPU or another PyTorch build: {ref}`pytorch-builds`.
@@ -47,6 +47,7 @@ pip install "deeprm[train]"    # with uv: uv pip install "deeprm[train]"
 deeprm --version
 deeprm check
 ```
-* `deeprm check` prints the engine `deeprm call run` will use and whether the C++ preprocessing binary starts.
+* `deeprm check` prints the engine `deeprm call run` will use and whether the C++ preprocessing and pileup binaries
+  start.
 * For each problem it finds, it prints the command that fixes it. It exits with status 1 if it finds an error.
 * If something fails: {doc}`troubleshooting`. More options: {doc}`advanced-installation`.

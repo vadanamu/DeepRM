@@ -158,22 +158,22 @@ def test_a_read_split_over_workers_gets_one_record(tmp_path):
 
 
 def test_modbam_of_several_references_is_the_same_at_any_thread(tmp_path, monkeypatch):
-    """With several references, --thread 4 runs several modBAM writers (one per run of references); their shards
-    merge into the modBAM that one writer makes at --thread 1: one @RG and one record per read."""
+    """With several references, --thread 4 runs several modBAM writers (taking runs of references from a queue); their
+    shards join into the modBAM that one writer makes at --thread 1: one @RG and one record per read."""
     bam = tmp_path / "input.bam"
     reads = _write_input_bam(bam, n_reads=60, seed=9, n_refs=5)
     inp = tmp_path / "molecule-level"
     inp.mkdir()
     _write_per_read_files(inp, reads, n_files=6)
     n_writers = []
-    modbam_buckets = pileup_deeprm._modbam_buckets
+    start_writers = pileup_deeprm._start_modbam_writers
 
-    def counted_buckets(bam_path, ref_ids, n):
-        buckets = modbam_buckets(bam_path, ref_ids, n)
-        n_writers.append(len(buckets))
-        return buckets
+    def counted_writers(*a, **k):
+        writers = start_writers(*a, **k)
+        n_writers.append(len(writers["procs"]))
+        return writers
 
-    monkeypatch.setattr(pileup_deeprm, "_modbam_buckets", counted_buckets)
+    monkeypatch.setattr(pileup_deeprm, "_start_modbam_writers", counted_writers)
     out = {}
     for thread in (1, 4):
         folder = tmp_path / f"t{thread}"
@@ -216,11 +216,13 @@ def test_a_failed_modbam_step_removes_its_temporary_folder(tmp_path, monkeypatch
     _write_per_read_files(inp, reads, n_files=2)
     seen = {}
 
-    def failing_write(bam_path, rows_stems, ref_ids, out_path, threads, tmp_dir):
-        seen[tmp_dir] = sorted(os.listdir(tmp_dir))
+    def failing_finish(writers, bam_path, out_path, threads):
+        for proc in writers["procs"]:
+            proc.join()
+        seen[writers["tmp_dir"]] = sorted(os.listdir(writers["tmp_dir"]))
         raise RuntimeError("injected")
 
-    monkeypatch.setattr(pileup_deeprm, "_write_modbam", failing_write)
+    monkeypatch.setattr(pileup_deeprm, "_finish_modbam", failing_finish)
     out = tmp_path / "site-level"
     with pytest.raises(RuntimeError, match="injected"):
         pileup_deeprm.main(_args(inp, out, bam, thread=2))

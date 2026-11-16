@@ -37,7 +37,7 @@ of a run.
 ## `deeprm call pileup`
 
 ```{argparse}
-:module: deeprm.inference.pileup_deeprm
+:module: deeprm.inference.pileup
 :func: add_arguments
 :passparser:
 :prog: deeprm call pileup

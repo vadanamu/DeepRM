@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deeprm"
-version = "1.2"
+version = "1.2.1"
 description = "DeepRM: Deep Learning for RNA Modification Detection using Nanopore Direct RNA Sequencing"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -93,7 +93,7 @@ Source = "https://github.com/vadanamu/deeprm"
 
 # The C++ preprocessing binary and the bundled weights, so that the wheel holds them whatever MANIFEST.in says.
 [tool.setuptools.package-data]
-"deeprm.inference" = ["deeprm_preprocess"]
+"deeprm.inference" = ["deeprm_preprocess", "deeprm_pileup"]
 "deeprm.weight" = ["*.pt"]
 
 [tool.setuptools]

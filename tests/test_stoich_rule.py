@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import math
+import multiprocessing as mp
 import os
 import sys
 
@@ -114,6 +115,22 @@ def test_site_stoichiometry_outputs():
     # one value formula: the Eq. 14 value where it is above 0, else the confident-read fraction k / n
     value, kn, s = reported[state == 1], (k / n)[state == 1], eq14[state == 1]
     assert np.array_equal(value, np.where(s > 0, s, kn))
+
+
+def test_report_all_stoichiometry_writes_every_value():
+    """mask=False (--report-all-stoichiometry): the sites that are not reported get the value the rule reports for the
+    others (the Eq. 14 value where it is above 0, else the confident-read fraction k / n), in both outputs; the states
+    and the reported values do not change."""
+    s12, n, k, logsum, logsum_cal = _random_sites(seed=1)
+    sums = _sums(n, k, logsum, logsum_cal)
+    masked = pileup_deeprm._site_stoichiometry(sums, s12, 0.98)
+    reported, state, release, eq14 = pileup_deeprm._site_stoichiometry(sums, s12, 0.98, mask=False)
+    hidden = state == -1
+    assert hidden.any() and np.array_equal(state, masked[1]) and np.array_equal(eq14, masked[3])
+    assert np.array_equal(reported, release) and not np.isnan(release).any()
+    assert np.array_equal(reported[~hidden], masked[0][~hidden])
+    assert np.array_equal(reported[hidden], np.where(eq14 > 0, eq14, k / n)[hidden])
+    assert (reported[hidden] > 0).any()
 
 
 def test_site_rule_keeps_its_cut_whatever_the_threshold():
@@ -316,7 +333,8 @@ def test_pileup_survives_an_empty_worker_and_reports_worker_errors(tmp_path):
 
 
 def test_pileup_parent_failure_releases_workers(tmp_path, monkeypatch):
-    """A failure in the parent while it reads the workers' results must not leave the workers waiting."""
+    """A failure in the parent while it joins the parts of the site table stops the pileup with that error, leaves no
+    worker running and removes the temporary folders."""
     rng = np.random.default_rng(7)
     inp = tmp_path / "molecule-level"
     inp.mkdir()
@@ -331,18 +349,22 @@ def test_pileup_parent_failure_releases_workers(tmp_path, monkeypatch):
     bam = tmp_path / "x.bam"
     _write_bam(bam)
 
-    def failing_view(meta):
+    def failing_join(stem, parts):
+        assert sum(part["rows"] for part in parts) == 3
+        assert all(os.path.isfile(part["stem"] + ".bed") for part in parts)
         raise MemoryError("injected")
 
-    monkeypatch.setattr(pileup_deeprm, "shm_view", failing_view)
+    monkeypatch.setattr(pileup_deeprm, "_join_table", failing_join)
     args = _pileup_args(inp, tmp_path / "out", bam)
     args.thread = 3
     with pytest.raises(MemoryError):
         pileup_main(args)
+    assert not mp.active_children()
+    assert not [p for p in os.listdir(tmp_path / "out") if p.startswith(".deeprm_")]
 
 
 def test_site_sums_must_be_int64_or_float64():
-    """The workers send their sums in one shared-memory block per dtype: a sum of another dtype is refused."""
+    """The workers' site tables hold every sum as int64 or float64: a sum of another dtype is refused."""
     ints, floats = pileup_deeprm._sums_by_dtype(pileup_deeprm.SITE_SUMS)
     assert (ints, floats) == (pileup_deeprm.INT_SUMS, pileup_deeprm.FLOAT_SUMS)
     assert set(ints) | set(floats) == {key for key, _ in pileup_deeprm.SITE_SUMS}

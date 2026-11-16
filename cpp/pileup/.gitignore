@@ -1,0 +1,25 @@
+# what make writes (see BUILD.md)
+/bin/
+/build/
+/pileup/build_time.h
+/libdeflate/build/
+# htslib's configure and build outputs
+/htslib/configure
+/htslib/config.h
+/htslib/config.h.in
+/htslib/config.h.in~
+/htslib/config.log
+/htslib/config.mk
+/htslib/config.status
+/htslib/config_vars.h
+/htslib/autom4te.cache/
+/htslib/version.h
+/htslib/**/*.o
+/htslib/**/*.pico
+/htslib/*.a
+/htslib/config.guess
+/htslib/config.sub
+/htslib/htscodecs/htscodecs/version.h
+/htslib/htslib.pc.tmp
+/htslib/htslib-uninstalled.pc
+/htslib/htslib_static.mk

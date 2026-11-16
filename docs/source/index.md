@@ -37,6 +37,8 @@ DeepRM v1.2 uses substantially less memory, runs faster and detects RNA modifica
 * With input on a local SSD, the preprocessing runs 2 to 2.5 times as fast as DeepRM v1.1's. Run on Dorado's output
   while Dorado basecalls, it finishes when basecalling does, so it adds no time to the run.
 * Inference is 1.9 to 3.0 times as fast as DeepRM v1.1 on A100, H100 and B200 GPUs.
+* v1.2.1: with default settings, pileup uses 35 to 52 times less peak memory and runs 16 to 30 times as fast as
+  v1.2's (input on a local SSD).
 
 **2. Improved RNA modification detection accuracy**
 * Higher m6A recall, most of all for clustered m6A (the nearest other m6A 1–4 nt away): 95.7 %, against 85.8 % with
@@ -52,7 +54,7 @@ Benchmark details and the full list of changes: {doc}`changelog`.
 * **High accuracy**: Achieves state-of-the-art accuracy in RNA modification detection and stoichiometry measurement.
 * **Single-molecule resolution**: Provides single-molecule level predictions for RNA modifications.
 * **End-to-end pipeline**: Easy-to-use pipeline from raw reads to molecule-level and site-level predictions.
-* **Fast**: Compiled inference and a fast C++ preprocessing.
+* **Fast**: Compiled inference, and fast C++ preprocessing and pileup.
 * **Customizable**: Supports training of custom models.
 
 

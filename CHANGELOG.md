@@ -1,5 +1,58 @@
 # 📜 Changelog
 
+## [1.2.1] - 2026-11-16
+
+Changes since 1.2. The model weights are those of 1.2, and so are the results.
+
+### Fixed
+- `deeprm call pileup`, and the pileup at the end of `deeprm call run`, ran out of memory on large runs: its memory grew
+  with the number of per-read rows. The workers kept one site table per input file and every row for the modBAM until
+  they had read all their files, the main process copied every worker's table while the workers still held theirs,
+  and the modBAM writers held all their rows at once. On a run of 6.2 billion rows, 1.2 needs 1,068 GB of memory.
+  1.2.1 fixes this in both pileups. On the same run, the new C++ pileup (see Added) needs 30 GB, and the Python
+  pileup, which runs where the C++ pileup cannot, needs 83 GB.
+- How the Python pileup was fixed: reading processes send each per-read row to the worker that adds up its range of
+  sites, so a site is held once, by one worker, and no table is merged or held whole; the workers write their parts
+  of the site tables and the parts are joined. The rows for the modBAM are written to disk as they are read (5 bytes
+  each), and the modBAM writers load them a slice at a time (a large reference, such as a chromosome, in windows of
+  positions).
+- Both write the same site tables as 1.2, to the byte, and a modBAM with the same records (its file is compressed
+  differently, see below). Their temporary files go to the output folder unless `--tmp-dir` names another, and need
+  free space: on the same run, the output folder holds up to 88 GB during the run with the C++ program and 186 GB
+  with the Python pileup, against 70 GB and 76 GB at the end.
+- The default `--thread` of `deeprm call prep` and of the pileup, and the memory of the modBAM sort, follow the CPUs and
+  memory the process can use (CPU affinity, and container, Slurm or other cgroup limits). Inside a container they
+  followed the whole machine.
+
+### Added
+- A C++ pileup program, `deeprm_pileup`, installed with DeepRM. `deeprm call pileup`, and the pileup of
+  `deeprm call run`, run it whenever it gives the Python pileup's results, and the Python pileup otherwise: when the
+  program cannot start (it needs Linux x86_64, glibc 2.28 or newer, and a CPU with AVX2 and FMA), with a `--threshold`
+  other than 0.98, or when NumPy computes the per-read terms of the site scores differently from it (for example on a
+  CPU without AVX512). The log says which pileup runs. `--pileup-bin` or `DEEPRM_PILEUP_BIN` name another copy;
+  `deeprm check` says whether it starts. This is the structure of the preprocessing binary.
+- `--report-all-stoichiometry` for `deeprm call pileup` and `deeprm call run`: the sites the stoichiometry rule does
+  not report get their estimate too, instead of 0 (NaN in `stoichiometry_release`); their `stoich_state` is still
+  -1. Without it, the outputs are those of 1.2.
+- `--tmp-dir` for `deeprm call pileup` and `deeprm call run`: a folder for the pileup's largest temporary files (those
+  of the modBAM) instead of the output folder.
+
+### Changed
+- The pileup is faster. On the run above, with its data on a local SSD, the C++ program takes 2 minutes instead of 34
+  with the modBAM, and under 1 instead of 9 without it; with its data on a network file system (NFS), 10 to 19 minutes
+  instead of 136 (two runs: on a shared file server the time varies from run to run). The Python pileup takes 7, 2,
+  and 13 to 15 minutes.
+- The modBAM is written faster: its parts are compressed at BGZF level 1 and joined without being compressed again,
+  and its index is made without reading the whole modBAM again. The modBAM file is about 15 % larger than with 1.2
+  (27 % with the Python pileup); its records are the same.
+- In the Python pileup, the modBAM writers take their work from a queue (a large reference is split among them) and
+  make the tags for many reads at once. Their parts are joined by copying their bytes, several at a time (with
+  `copy_file_range`, so that on NFS 4.2 the file server can make the copy). If a part cannot be indexed or copied,
+  samtools joins the parts as before.
+- A run that fails no longer leaves temporary files or a partial modBAM in the output folder.
+- The modBAM header lists each comment line (`@CO`) of the input BAM once. 1.2 repeated it once per modBAM writer,
+  so the number of copies followed `--thread`.
+
 ## [1.2] - 2026-10-27
 
 Changes since 1.1.3.

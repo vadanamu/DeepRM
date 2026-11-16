@@ -9,6 +9,14 @@ More detail on the commands of {doc}`usage`. Errors and their fixes are on [Trou
 * A basecaller that exits with an error but closes its output normally is not seen through a pipe. Run the pipeline
   after `set -o pipefail`, or give the basecaller command to `--bam-cmd`, which fails the run if the command fails.
 
+(prep-read-ends)=
+## Sites near read ends (`deeprm call prep`)
+* A site whose context block reaches past a read end is skipped by default.
+* `--zero-pad` pads such a block with zeros instead, and `--edge-pad` with the value at the read end, so these sites
+  get a prediction too.
+* `--trim` trims low-quality read ends before the context blocks are cut. `--trim-threshold` sets the base quality
+  that counts as good.
+
 (inference-engines)=
 ## Inference engines
 DeepRM picks the engine by itself; `deeprm check` prints which one. All engines run the same model; their per-read
@@ -27,8 +35,7 @@ bit-identical results ({ref}`run-to-run`).
 * `--engine fa4|fast|eager` forces an engine and turns that warning off. Use it only when needed, for example
   `--engine eager` when the model cannot compile on an older GPU. A forced `fa4` also runs, untested, on other
   NVIDIA GPUs of compute capability 8.0 or newer.
-* A model file that does not name its architecture needs `--model-type deeprm_v12`.
-* `--engine` and `--model-type` are not shown by `deeprm call run -h`.
+* `--engine` is not shown by `deeprm call run -h`.
 
 (batch-memory)=
 ## Batch size and GPU memory
@@ -37,6 +44,14 @@ bit-identical results ({ref}`run-to-run`).
 * Set `-s` lower yourself to skip these retries. With the default batch, the model needs about 13 to 15 GiB of GPU
   memory with `fa4` or `fast`, and about 70 GiB with `eager`. Memory scales with `-s`.
 * On a 16 GB GPU, start with `-s 8000` (`fast`) or `-s 2000` (`eager`).
+
+(other-model)=
+## Another model file (`--model`)
+* `--model <model_file>` runs another v1.2 model file, such as one from `deeprm train run`, instead of the bundled
+  model.
+* DeepRM v1.1 model files need DeepRM v1.1 (`pip install deeprm==1.1.3`).
+* A model file that does not name its architecture also needs `--model-type deeprm_v12` (not shown by
+  `deeprm call run -h`).
 
 (genomic-coordinates)=
 ## Genomic coordinates (`--annot`)
@@ -48,6 +63,15 @@ bit-identical results ({ref}`run-to-run`).
   without it (`ENST00000123456`), not the other way round.
 * The log counts the transcripts not found. Their sites are left out of the genomic tables.
 * Sites from reads aligned in reverse (kept with `-g 260`) get their own rows on the opposite genomic strand.
+
+(pileup-options)=
+## Pileup options (`deeprm call run`, `deeprm call pileup`)
+* `--report-all-stoichiometry`: also write the stoichiometry of the sites that are not reported
+  ({ref}`site-stoichiometry`).
+* `--tmp-dir <folder>`: put the pileup's largest temporary files (those of the modBAM) in this folder instead of the
+  output folder. The output folder still needs room for the outputs. A folder on a local disk is faster than one on a
+  network file system.
+* `--pileup-bin <file>`: use another build of the C++ pileup binary ({ref}`pileup-binary`).
 
 (output-formats)=
 ## Output formats
@@ -66,6 +90,9 @@ The BED file is [bedMethyl](https://genome.ucsc.edu/goldenpath/help/bedMethyl.ht
 * The stoichiometry of a site is the fraction of the As at that site that are m6A.
 * Some sites are **not reported**: their reads are not enough to decide the stoichiometry. Their stoichiometry is
   written as 0 (BED column 11 and `stoichiometry`) and as `NaN` in `stoichiometry_release`.
+* To write their stoichiometry anyway, add `--report-all-stoichiometry` to `deeprm call run` or `deeprm call pileup`.
+  They then get their estimate in BED columns 11 to 13, `stoichiometry` and `stoichiometry_release`. Their
+  `stoich_state` is still `-1`: treat these values with care.
 * `--threshold` (default 0.98) changes the modscore and `count_pos`. It does not change which sites are reported
   or their stoichiometry.
 * A reported stoichiometry below about 1 % is close to background.
@@ -76,7 +103,7 @@ The BED file is [bedMethyl](https://genome.ucsc.edu/goldenpath/help/bedMethyl.ht
 * `modscore`, `stoichiometry` (both from 0 to 1)
 * `count_all` (reads), `count_pos` (reads at or above `--threshold`)
 * `stoich_state`: `1` reported, `-1` not reported
-* `stoichiometry_release`: the stoichiometry, `NaN` where not reported
+* `stoichiometry_release`: the stoichiometry, `NaN` where not reported (unless `--report-all-stoichiometry`)
 * `stoichiometry_eq14`: the stoichiometry as DeepRM v1.1 computes it
 * `logsum_1_p_pos`, `kl_div_pos`, `kl_div_neg`: the per-site sums the scores come from
 

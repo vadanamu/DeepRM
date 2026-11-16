@@ -3127,14 +3127,15 @@ def add_arguments(parser: argparse.ArgumentParser):
     Returns:
         None
     """
-    num_cpu = os.cpu_count()
+    from deeprm.utils.utils import default_threads
+
     parser.add_argument("--pod5", "-p", type=str, required=True,
                         help="POD5 input directory, or a single POD5 file")
     parser.add_argument("--bam", "-b", type=str, default=None,
                         help="Dorado BAM file, or - to read the BAM from standard input")
     parser.add_argument("--output", "-o", type=str, required=True, help="Output directory")
-    parser.add_argument("--thread", "-t", type=int, default=max(1, int(num_cpu * 0.95)),
-                        help="Number of threads to use (default: 95%% of the CPUs)")
+    parser.add_argument("--thread", "-t", type=int, default=default_threads(),
+                        help="Number of threads to use (default: 95%% of the CPUs this process can use)")
     parser.add_argument(
         "--qcut",
         "-q",

@@ -35,6 +35,132 @@ def save_run_info(path, info):
     os.replace(part, path)
 
 
+def _cgroup_dirs():
+    """The cgroup folders of this process, from its own cgroup up to the root, as (version, path) pairs: one folder
+    per level for cgroup v2, the memory and cpu controllers' folders for v1. Empty when /proc/self/cgroup cannot be
+    read (not Linux)."""
+    import os
+
+    try:
+        with open("/proc/self/cgroup") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return []
+    dirs = []
+    for line in lines:
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        _, controllers, path = parts
+        if controllers == "":  # cgroup v2: one hierarchy
+            roots = [("v2", "/sys/fs/cgroup")]
+        else:  # cgroup v1: one hierarchy per controller
+            roots = [("v1", f"/sys/fs/cgroup/{c}") for c in controllers.split(",") if c in ("memory", "cpu")]
+            if "cpu" in controllers.split(","):
+                roots.append(("v1", "/sys/fs/cgroup/cpu,cpuacct"))
+        for version, root in roots:
+            # Inside a container the cgroup namespace makes the process's own cgroup the root ("/").
+            rel = path.strip("/")
+            while True:
+                d = os.path.join(root, rel) if rel else root
+                if os.path.isdir(d):
+                    dirs.append((version, d))
+                if not rel:
+                    break
+                rel = os.path.dirname(rel)
+    return dirs
+
+
+def _read_number(path):
+    """The first number in a cgroup file, as an int; None for 'max', a missing file or a file without a number."""
+    try:
+        with open(path) as f:
+            text = f.read().split()
+    except OSError:
+        return None
+    if not text or text[0] == "max":
+        return None
+    try:
+        return int(text[0])
+    except ValueError:
+        return None
+
+
+def available_memory():
+    """Bytes of memory this process can still use: the system's available memory, or less when a cgroup limit (a
+    container, a Slurm job, a systemd scope) leaves less below its limit. psutil alone reports the whole machine's
+    memory inside a container."""
+    import psutil
+
+    avail = psutil.virtual_memory().available
+    for version, d in _cgroup_dirs():
+        if version == "v2":
+            limit, usage = _read_number(f"{d}/memory.max"), _read_number(f"{d}/memory.current")
+            cache = _read_stat(f"{d}/memory.stat", "inactive_file")
+        else:
+            limit, usage = _read_number(f"{d}/memory.limit_in_bytes"), _read_number(f"{d}/memory.usage_in_bytes")
+            cache = _read_stat(f"{d}/memory.stat", "total_inactive_file")
+            if limit is not None and limit >= 1 << 60:  # v1 writes a huge number for "no limit"
+                limit = None
+        if limit is not None and usage is not None:
+            # the usage counts the page cache; its inactive part is given back when memory is short
+            avail = min(avail, max(0, limit - usage + (cache or 0)))
+    return avail
+
+
+def _read_stat(path, key):
+    """The value of `key` in a cgroup memory.stat file, or None."""
+    try:
+        with open(path) as fh:
+            for line in fh:
+                name, _, value = line.partition(" ")
+                if name == key:
+                    return int(value)
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def available_cpus():
+    """CPUs this process can use: those it may run on (os.sched_getaffinity), or fewer when a cgroup CPU quota allows
+    less. os.cpu_count() alone reports the whole machine's CPUs inside a container."""
+    import math
+    import os
+
+    try:
+        n = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        n = os.cpu_count() or 1
+    for version, d in _cgroup_dirs():
+        quota = period = None
+        if version == "v2":
+            try:
+                with open(f"{d}/cpu.max") as f:
+                    fields = f.read().split()
+                if len(fields) == 2 and fields[0] != "max":
+                    quota, period = int(fields[0]), int(fields[1])
+            except (OSError, ValueError):
+                pass
+        else:
+            quota, period = _read_number(f"{d}/cpu.cfs_quota_us"), _read_number(f"{d}/cpu.cfs_period_us")
+            if quota is not None and quota < 0:  # -1: no quota
+                quota = None
+        if quota and period:
+            n = min(n, max(1, math.ceil(quota / period)))
+    return max(1, n)
+
+
+def default_threads():
+    """The default --thread of deeprm call prep and pileup: 95% of the CPUs this process can use, at least 1."""
+    return max(1, int(0.95 * available_cpus()))
+
+
+def sort_memory_per_thread(threads):
+    """The `samtools sort -m` value in MiB for `threads` threads: half of the memory this process can still use
+    (see available_memory), shared between the threads; at least 1."""
+    return max(1, int(0.5 * available_memory() / (1024**2) / threads))
+
+
 def mean_phred(phred):
     """
     Calculates the mean Phred quality score.
@@ -81,7 +207,6 @@ def maybe_index_bam(bam_path: str, threads: int = 1) -> str:
     import os
     from pathlib import Path
 
-    import psutil
     import pysam
 
     from deeprm.utils.logging import get_logger
@@ -200,7 +325,7 @@ def maybe_index_bam(bam_path: str, threads: int = 1) -> str:
     # Sort into <name>.tmp, then rename it, so that an interrupted sort never leaves a partial <name>.
     log.info(f"Writing a coordinate-sorted copy of {bam_path}: {sorted_path}")
     tmp_path = sorted_path.with_name(sorted_path.name + ".tmp")
-    pysam_thread_memory = max(1, int(0.5 * psutil.virtual_memory().available / (1024**2) / threads))
+    pysam_thread_memory = sort_memory_per_thread(threads)
     pysam.sort("-@", str(threads), f"-m {pysam_thread_memory}M", "-O", "bam", "-o", str(tmp_path), str(bam_path))
     os.replace(tmp_path, sorted_path)
     pysam.index("-@", str(threads), str(sorted_path))

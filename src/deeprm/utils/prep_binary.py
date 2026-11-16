@@ -1,4 +1,5 @@
-"""Can the C++ preprocessing binary start here, and if not, why? Used by deeprm call prep and deeprm check.
+"""Can a C++ binary of DeepRM (the preprocessing, the pileup) start here, and if not, why? Used by deeprm call prep,
+deeprm call pileup and deeprm check.
 
 This module imports nothing heavy (no pod5, pysam or torch), so deeprm check can use it on any system.
 """
@@ -23,8 +24,30 @@ LIB_PACKAGES = {
     "libbz2.so.1": "RHEL/Rocky/Alma/Fedora: bzip2-libs",
 }
 _ELF_MACHINES = {0x3E: "x86_64", 0xB7: "aarch64", 0x28: "arm", 0x03: "i386", 0xF3: "riscv64", 0x15: "ppc64le"}
-# The binary that ships in the package (the same path as deeprm.inference.inference_preprocess.DEFAULT_BIN).
-BUNDLED = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "inference", "deeprm_preprocess")
+
+
+@dataclass(frozen=True)
+class Program:
+    """A C++ binary of DeepRM: its file name in the package, the option and environment variable that name another
+    copy, and the word its `--version` line carries before the version (as in "DeepRM Preprocessing v1.2.1")."""
+
+    file: str
+    option: str
+    env: str
+    marker: str
+
+
+PREP = Program("deeprm_preprocess", "--preprocess-bin", "DEEPRM_PREPROCESS_BIN", "Preprocessing v")
+PILEUP = Program("deeprm_pileup", "--pileup-bin", "DEEPRM_PILEUP_BIN", "Pileup v")
+
+
+def bundled(program: Program = PREP) -> str:
+    """The path of the binary that ships in the package (beside the modules of deeprm.inference)."""
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "inference", program.file)
+
+
+# The preprocessing binary that ships in the package (as deeprm.inference.inference_preprocess.DEFAULT_BIN).
+BUNDLED = bundled(PREP)
 
 
 @dataclass
@@ -70,7 +93,8 @@ def _elf(path: str) -> Tuple[str | None, str | None]:
 
 
 def named_path(value: str) -> str:
-    """The binary that a value of --preprocess-bin or DEEPRM_PREPROCESS_BIN names: a path is made absolute (it is run
+    """The binary that a value of --preprocess-bin, --pileup-bin or their environment variables names: a path is made
+    absolute (it is run
     from a subprocess, which would otherwise look a name without a slash up on PATH); a bare name found on PATH is
     that program, otherwise the file of that name in the current folder."""
     if os.sep not in value:
@@ -132,23 +156,24 @@ def _version(text: str) -> Tuple[int, ...]:
     return tuple(int("".join(c for c in part if c.isdigit()) or 0) for part in text.split("."))
 
 
-def status(path: str, timeout: float = 60) -> Status:
+def status(path: str, timeout: float = 60, program: Program = PREP) -> Status:
     """Whether the binary at `path` starts on this system: runs `path --version` after cheap checks of the file.
+    `program` says which binary it is meant to be, for the hints and the version line.
 
     Never raises: anything unexpected becomes a not-ok Status, so a check of the binary can never stop a run.
     """
     try:
-        return _status(os.path.abspath(path), timeout)
+        return _status(os.path.abspath(path), timeout, program)
     except Exception as exc:  # noqa: BLE001 -- see the docstring
         return Status(False, reason=f"the binary could not be checked ({type(exc).__name__}: {exc})", kind="other")
 
 
-def _status(path: str, timeout: float) -> Status:
+def _status(path: str, timeout: float, program: Program) -> Status:
     if not os.path.isfile(path):
         return Status(
             False,
             reason=f"there is no file at {path}",
-            hint="Reinstall DeepRM, or check the path given with --preprocess-bin or DEEPRM_PREPROCESS_BIN.",
+            hint=f"Reinstall DeepRM, or check the path given with {program.option} or {program.env}.",
             kind="missing",
         )
     try:
@@ -182,7 +207,7 @@ def _status(path: str, timeout: float) -> Status:
         return Status(
             False,
             reason=f"the folder {os.path.dirname(path)} is on a file system where programs cannot run (noexec)",
-            hint="Copy deeprm_preprocess to a folder where programs can run; set DEEPRM_PREPROCESS_BIN to the copy.",
+            hint=f"Copy {program.file} to a folder where programs can run; set {program.env} to the copy.",
             kind="noexec",
         )
     if not os.stat(path).st_mode & 0o111:
@@ -211,7 +236,7 @@ def _status(path: str, timeout: float) -> Status:
     if done.returncode == 0:
         lines = done.stdout.strip().splitlines()
         # the first line is the start-time stamp; the version line names the program
-        version = next((line for line in lines if "Preprocessing v" in line), lines[-1] if lines else "")
+        version = next((line for line in lines if program.marker in line), lines[-1] if lines else "")
         return Status(True, version=version)
     return explain_failure(path, done.returncode, (done.stderr or "") + (done.stdout or ""))
 

@@ -448,3 +448,38 @@ def test_vectorised_exon_checks_keep_the_rows_the_row_by_row_checks_keep(tmp_pat
     first_two = {r[1]: [int(x) for x in r[9].split(",")[:2] if x] for r in rows if r[8] > 1}
     descending = {name for name, x in first_two.items() if len(x) == 2 and x[0] > x[1]}
     assert descending and not descending & set(fast.index), "exons in descending order are dropped"
+
+
+def test_report_all_stoichiometry_writes_the_masked_values(example):
+    """--report-all-stoichiometry: in the transcript and the genomic tables, the sites that are not reported get their
+    value instead of 0 (NaN in stoichiometry_release); the states, the reported values and the other columns stay."""
+    tmp_path, inp, bam, annot = example
+    # two shallow sites with one confident read among ten weak ones: too few reads to tell them from background, so
+    # the rule does not report them (tx1 positions 1 and 2, chr1:1001 and 1002 on the + strand)
+    label = np.repeat([_label(0, 1), _label(0, 2)], 10)
+    pred = np.tile([0.995] + [0.3] * 9, 2)
+    _save_reads(inp / "inference_0_2.npz", label, pred)
+    masked, unmasked = tmp_path / "masked", tmp_path / "unmasked"
+    pileup_main(_args(inp, masked, bam, annot))
+    args = _args(inp, unmasked, bam, annot)
+    args.report_all_stoichiometry = True
+    pileup_main(args)
+    for stem in ("pileup", "genomic_pileup"):
+        a, b = (np.load(folder / f"{stem}.npz", allow_pickle=True) for folder in (masked, unmasked))
+        hidden = a["stoich_state"] == -1
+        assert hidden.any() and np.array_equal(a["stoich_state"], b["stoich_state"])
+        for key in a.files:
+            if key not in ("stoichiometry", "stoichiometry_release"):
+                assert a[key].dtype == b[key].dtype and a[key].tobytes() == b[key].tobytes(), key
+        assert np.array_equal(a["stoichiometry"][~hidden], b["stoichiometry"][~hidden])
+        assert (a["stoichiometry"][hidden] == 0).all() and np.isnan(a["stoichiometry_release"][hidden]).all()
+        assert np.array_equal(b["stoichiometry"], b["stoichiometry_release"])
+        assert not np.isnan(b["stoichiometry_release"]).any() and (b["stoichiometry"][hidden] > 0).any()
+        # the BED: only columns 11 to 13 (the stoichiometry, %, and the modified and unmodified reads it gives) of the
+        # sites that are not reported change
+        rows_a, rows_b = ((folder / f"{stem}.bed").read_text().splitlines() for folder in (masked, unmasked))
+        assert len(rows_a) == len(rows_b) == len(hidden)
+        for row_a, row_b, h in zip(rows_a, rows_b, hidden):
+            cols_a, cols_b = row_a.split("\t"), row_b.split("\t")
+            assert cols_a[:10] + cols_a[13:] == cols_b[:10] + cols_b[13:]
+            assert (cols_a[10:13] == cols_b[10:13]) or h

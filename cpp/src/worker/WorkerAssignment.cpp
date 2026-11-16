@@ -1,13 +1,8 @@
 /**
- * Copyright (C) 2026 Genome4me Incorporated - All Rights Reserved.
- * This software, including its source code, embedded concepts, and associated
- * documentation, is proprietary to Genome4me Incorporated and is protected
- * under trade secret and copyright law. Unauthorized use, copying, modification,
- * distribution, or disclosure to third parties, in whole or in part, is
- * strictly prohibited unless prior written permission is granted by Genome4me
- * Incorporated. Any such unauthorized actions constitute an infringement of
- * the intellectual property rights of Genome4me Incorporated. For licensing
- * inquiries or permissions, please contact Genome4me Incorporated.
+ * SPDX-License-Identifier: CC-BY-NC-SA-4.0
+ *
+ * Part of DeepRM. Licensed under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0
+ * International License; see LICENSE.md at the top of the DeepRM repository.
  */
 
 #include "worker/WorkerAssignment.h"

@@ -128,6 +128,26 @@ def add_arguments(parser: argparse.ArgumentParser):
         "--skip-modbam", "-sm", action="store_true", help="Do not write the modBAM file (per-read MM and ML tags)"
     )
     parser.add_argument(
+        "--tmp-dir",
+        type=str,
+        default=None,
+        help="Folder for the pileup's largest temporary files, the per-read rows and the modBAM parts (default: its "
+        "output folder, which still needs room for the outputs). A local disk is faster than a network file system.",
+    )
+    parser.add_argument(
+        "--report-all-stoichiometry",
+        action="store_true",
+        help="Also write the stoichiometry of the sites whose reads are not enough to decide it, instead of 0 (NaN in "
+        "stoichiometry_release); their stoich_state is still -1",
+    )
+    parser.add_argument(
+        "--pileup-bin",
+        type=str,
+        default=None,
+        help="Path to a pileup binary to use instead of the bundled one (optional); the run stops before the "
+        "inference if it cannot start",
+    )
+    parser.add_argument(
         "--label_div",
         "-d",
         type=int,
@@ -253,9 +273,11 @@ def main(args: argparse.Namespace):
 
     _validate_args(args)
     # Check the pileup settings too, so that a bad --annot stops the run before the inference.
+    from deeprm.inference.pileup import check_named_binary
     from deeprm.inference.pileup_deeprm import _validate_args as _validate_pileup_args
 
     _validate_pileup_args(args)
+    check_named_binary(args)  # a pileup binary named with --pileup-bin or DEEPRM_PILEUP_BIN must start
     _normalize_gpu_config(args)
 
     output = f"{args.output}/{os.path.basename(args.data)}"
@@ -278,7 +300,7 @@ def main(args: argparse.Namespace):
         run_inference(args)
         log.info("Inference Program Finished.")
 
-        from deeprm.inference.pileup_deeprm import main as pileup_main
+        from deeprm.inference.pileup import main as pileup_main
 
         args.input = inference_output
         args.output = pileup_output

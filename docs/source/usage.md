@@ -32,9 +32,7 @@ deeprm call prep -p <pod5_dir> -b <bam_path> -o <prep_dir>
 #### Main options of `deeprm call prep`
 * `-g` (`--filter-flag`, default 276): SAM flag bits of the reads to skip (260 for a genome alignment).
 * `-q` (`--qcut`, default 0): skip reads with a lower mean base quality.
-* `--zero-pad` or `--edge-pad`: pad sites near a read end instead of skipping them. `--trim`: trim low-quality
-  read ends.
-* `deeprm call prep -h` lists all options.
+* More options: {ref}`prep-read-ends`. All options: {doc}`cli/call` (or `deeprm call prep -h`).
 
 ### Run Inference
 ```bash
@@ -45,18 +43,19 @@ This runs the model, then the pileup. The results go to `<prediction_dir>/<prep_
 * `--gpu-pool 0 1`: the GPUs to use (default: all). `--gpu 0` runs on the CPU, which is much slower.
 * `-s` (`--batch`, default 16000): batch size ({ref}`batch-memory`).
 * `--annot <annotation_file>`: also write genomic coordinates ({ref}`genomic-coordinates`).
-* `--threshold` (default 0.98): the per-read probability at which a read counts as modified.
+* `--threshold` (default 0.98): the per-read probability at which a read counts as modified. Another value uses the
+  Python pileup, which is slower ({ref}`pileup-binary`).
 * `--skip-modbam`: do not write the modBAM file.
 * `--resume`: continue a stopped run ({ref}`resume-run`).
-* `--model <model_file>`: another v1.2 model file, such as one from `deeprm train run` (default: the bundled model).
-  DeepRM v1.1 model files need DeepRM v1.1 (`pip install deeprm==1.1.3`).
-* Engines: {ref}`inference-engines`.
+* More options: {ref}`pileup-options`, {ref}`other-model`, {ref}`inference-engines`. All options: {doc}`cli/call`.
 
 ### Run the pileup again (optional)
 To remake the site-level files, for example with another `--threshold` or `--annot`:
 ```bash
 deeprm call pileup -i <prediction_dir>/<prep_dir name>/molecule-level -b <bam_path> -o <site_dir>
 ```
+* It takes the pileup options of `deeprm call run`: `--threshold`, `--annot`, `--skip-modbam` and
+  {ref}`pileup-options`. All options: {doc}`cli/call`.
 
 (output-files)=
 ### Output files
@@ -93,6 +92,7 @@ deeprm train prep -p <unmodified_pod5_dir> -b <unmodified_bam_path> -o <prep_dir
 deeprm train prep -p <m6a_pod5_dir> -b <m6a_bam_path> -o <prep_dir>/m6a
 ```
 * `--method` (`lev` or `pw`) must match the oligonucleotide design: {ref}`training-details`.
+* All options of `deeprm train prep`, `compile` and `run`: {doc}`cli/train`.
 
 ### Compile Training Data
 ```bash

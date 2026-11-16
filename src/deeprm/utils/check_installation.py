@@ -1,5 +1,5 @@
 """`deeprm check`: checks PyTorch and torchmetrics, the GPUs and the engine they would run, and the C++ preprocessing
-binary, and prints each problem with a hint to fix it."""
+and pileup binaries, and prints each problem with a hint to fix it."""
 
 from __future__ import annotations
 
@@ -335,13 +335,59 @@ def _prep_binary_info(verbose: bool = False) -> Tuple[Dict[str, Any], List[Issue
         return info, []
 
 
+def _pileup_binary_info(verbose: bool = False) -> Tuple[Dict[str, Any], List[Issue]]:
+    """Whether the C++ pileup binary that deeprm call pileup (and deeprm call run) would run can start here, and if
+    not why. An installation without a bundled pileup binary is not a problem: the Python pileup runs."""
+    info: Dict[str, Any] = {}
+    try:
+        named = os.environ.get("DEEPRM_PILEUP_BIN")
+        path = prep_binary.named_path(named) if named else prep_binary.bundled(prep_binary.PILEUP)
+        info = {"path": path, "source": "DEEPRM_PILEUP_BIN" if named else "bundled"}
+        if not named and not os.path.exists(path):
+            info["present"] = False
+            return info, []
+        st = prep_binary.status(path, program=prep_binary.PILEUP)
+        info["starts"] = st.ok
+        if st.ok:
+            info["version"] = st.version
+            return info, []
+        info["reason"] = st.reason
+        if verbose:
+            try:
+                info["libraries"] = [f"{name} => {where}" for name, where in prep_binary.libraries(path)]
+            except Exception as e:  # noqa: BLE001 -- the list is extra detail; the issue below must still be kept
+                info["libraries"] = [f"(could not list: {type(e).__name__}: {e})"]
+        if st.kind == "mode" and _owned(path):
+            # deeprm call pileup sets the execute bits itself before it checks the binary
+            message = f"The C++ pileup binary cannot start yet: {st.reason}."
+            hint = "deeprm call pileup sets the execute permission itself, so it can use the binary."
+            return info, [Issue(severity="WARN", message=message, hint=hint, code="PILEUP_BINARY_CANNOT_START")]
+        if named:
+            # deeprm call pileup (and deeprm call run, before the inference) stops when a binary given with
+            # DEEPRM_PILEUP_BIN cannot start
+            hint = st.hint or "Use a binary that runs on this system."
+            hint += " Or unset DEEPRM_PILEUP_BIN to use the bundled binary."
+            message = f"The pileup binary given with DEEPRM_PILEUP_BIN cannot start: {st.reason}."
+            return info, [Issue(severity="ERROR", message=message, hint=hint, code="PILEUP_BINARY_CANNOT_START")]
+        if st.hint:
+            hint = f"{st.hint} Until then the pileup uses the Python code."
+        else:
+            hint = "The pileup uses the Python code on this system."
+        message = f"The C++ pileup binary cannot start: {st.reason}."
+        return info, [Issue(severity="WARN", message=message, hint=hint, code="PILEUP_BINARY_CANNOT_START")]
+    except Exception as e:  # noqa: BLE001 -- a check must never fail
+        info["error"] = f"{type(e).__name__}: {e}"
+        return info, []
+
+
 def collect(require_train: bool = False, verbose: bool = False) -> Tuple[Dict[str, Any], List[Issue]]:
     """Runs the checks of deeprm check. Returns (environment details, problems found).
 
     Args:
         require_train: Report a missing or too old torchmetrics (needed only for deeprm train) as an error, not a
             warning.
-        verbose: For a preprocessing binary that cannot start, also list the shared libraries it would load.
+        verbose: For a preprocessing or pileup binary that cannot start, also list the shared libraries it would
+            load.
     """
     env: Dict[str, Any] = {
         "python": platform.python_version(),
@@ -364,6 +410,8 @@ def collect(require_train: bool = False, verbose: bool = False) -> Tuple[Dict[st
     issues = torch_issues + tmetrics_issues
     env["preprocess_binary"], binary_issues = _prep_binary_info(verbose=verbose)
     issues += binary_issues
+    env["pileup_binary"], pileup_issues = _pileup_binary_info(verbose=verbose)
+    issues += pileup_issues
     fa4 = _fa4_warning()
     if fa4:
         env["engine"]["fa4_warning"] = fa4[1]
@@ -387,7 +435,8 @@ def parser(prog: str | None = None) -> argparse.ArgumentParser:
     """The command-line parser of deeprm check."""
     p = argparse.ArgumentParser(
         prog=prog or "deeprm check",
-        description="Check the DeepRM installation: PyTorch, torchmetrics, the GPU and the C++ preprocessing binary.",
+        description="Check the DeepRM installation: PyTorch, torchmetrics, the GPU and the C++ preprocessing and "
+        "pileup binaries.",
     )
     p.add_argument("--verbose", "-v", action="store_true", help="Also print all environment details (as JSON).")
     p.add_argument(
@@ -446,6 +495,13 @@ def main(argv: List[str] | None = None) -> int:
         log.info(f"C++ preprocessing binary: starts ({binary['version']}).")
     elif "starts" in binary:
         log.info("C++ preprocessing binary: cannot start (see PREP_BINARY_CANNOT_START above).")
+    pileup = env.get("pileup_binary", {})
+    if pileup.get("starts"):
+        log.info(f"C++ pileup binary: starts ({pileup['version']}).")
+    elif "starts" in pileup:
+        log.info("C++ pileup binary: cannot start (see PILEUP_BINARY_CANNOT_START above).")
+    elif pileup.get("present") is False:
+        log.info("C++ pileup binary: not in this installation; the pileup uses the Python code.")
     if engine.get("fa4_warning"):
         log.warning("%s", engine["fa4_warning"])  # last, so it is not lost above the other lines
 

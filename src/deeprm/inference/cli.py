@@ -10,7 +10,7 @@ from typing import List
 _LEAVES = {
     "prep": "deeprm.inference.inference_preprocess",
     "run": "deeprm.inference.inference",
-    "pileup": "deeprm.inference.pileup_deeprm",
+    "pileup": "deeprm.inference.pileup",
 }
 
 

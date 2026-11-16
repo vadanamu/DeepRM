@@ -34,7 +34,7 @@ and prints the command that installs the right build.
 
 (uv-prerelease)=
 ## uv
-* uv 0.12 or newer installs DeepRM v1.2 with `uv pip install deeprm`. DeepRM v1.2 depends on FlashAttention-4
+* uv 0.12 or newer installs DeepRM v1.2.1 with `uv pip install deeprm`. DeepRM v1.2.1 depends on FlashAttention-4
   version 4.0.0b35, a pre-release (test) version. An older uv installs such a pre-release only when the command names
   it with its version. Otherwise it picks DeepRM v1.1.3, the newest version without that dependency, and gives no
   error. Check with `uv --version`, then update uv, or name FlashAttention-4 in the command:
@@ -85,3 +85,36 @@ export DEEPRM_PREPROCESS_BIN=/path/to/deeprm_preprocess
 ### Build the binary
 The build steps are in [`cpp/README.md`](https://github.com/vadanamu/DeepRM/blob/public/cpp/README.md) in the source
 code.
+
+(pileup-binary)=
+## The C++ pileup binary
+`deeprm call pileup`, and the pileup at the end of `deeprm call run`, run `deeprm_pileup`, a C++ program installed
+with DeepRM. It writes the same output files as the Python pileup, faster.
+* It needs Linux x86_64 with glibc 2.28 or newer, on a CPU with AVX2 and FMA (most x86_64 CPUs of the last ten years). It
+  needs no other system library.
+* The pileup uses the Python code instead when:
+  * the binary cannot start: {ref}`Troubleshooting <binary-not-starting>`;
+  * you set `--threshold` to a value other than the default 0.98;
+  * NumPy on this system computes the per-read terms of the site scores differently from the binary, for example on
+    a CPU without AVX512. DeepRM checks this on sample values before each pileup, so that the results are always
+    those of the Python pileup.
+
+  The log says which pileup runs, and why.
+* If the binary fails on an input, its partial outputs are removed and the Python pileup runs instead.
+* When the binary works, `deeprm check` prints `C++ pileup binary: starts (...)`.
+
+### Use another build
+```bash
+export DEEPRM_PILEUP_BIN=/path/to/deeprm_pileup
+# or: deeprm call pileup --pileup-bin /path/to/deeprm_pileup ...
+```
+* If this binary cannot start, or fails, the pileup stops with an error (`deeprm call run` checks that it starts
+  before the inference). It does not use the Python pileup. If NumPy computes differently from it, the log warns and
+  the binary still runs.
+* Unset the variable, or drop the option, to go back to the bundled binary.
+
+### Build the pileup binary
+The build steps are in
+[`cpp/pileup/BUILD.md`](https://github.com/vadanamu/DeepRM/blob/public/cpp/pileup/BUILD.md) in the source code. How
+DeepRM runs the program, and what it must write:
+[`cpp/PILEUP_INTERFACE.md`](https://github.com/vadanamu/DeepRM/blob/public/cpp/PILEUP_INTERFACE.md).

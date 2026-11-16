@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.abspath("../../src"))
 project = "DeepRM"
 author = "Laboratory of Computational Biology, School of Biological Sciences, Seoul National University"
 copyright = "2025-2026, Seoul National University R&DB Foundation and Genome4me Inc."
-release = "1.2"
+release = "1.2.1"
 
 # ─── Extensions ───────────────────────────────────────────────────────────────
 
